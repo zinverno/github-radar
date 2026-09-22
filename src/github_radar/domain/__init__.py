@@ -2,7 +2,10 @@
 
 from github_radar.domain.models import (
     Contributor,
+    ContributorSnapshot,
     Developer,
+    DeveloperSnapshot,
+    PublicContactMethods,
     Repository,
     RepositorySnapshot,
     Topic,
@@ -11,7 +14,10 @@ from github_radar.domain.models import (
 
 __all__ = [
     "Contributor",
+    "ContributorSnapshot",
     "Developer",
+    "DeveloperSnapshot",
+    "PublicContactMethods",
     "Repository",
     "RepositorySnapshot",
     "Topic",

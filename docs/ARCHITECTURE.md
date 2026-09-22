@@ -118,6 +118,21 @@ instant: a re-observation at an already-captured instant **replaces** that row
 same second that happen to be captured at the same instant collapse into one
 row — accepted and documented trade-off.
 
+### `developer_snapshots`  (developer profile observation log, Phase 3)
+`id` (PK), `developer_id` (FK, CASCADE), `captured_at`, `followers`,
+`following`, `public_repos`. Unique constraint
+`uq_developer_snapshots_dev_captured` on `(developer_id, captured_at)`. Written
+by `sync_profile` whenever a developer profile is fetched; one observation per
+instant per developer. Only public, non-inferred counters are stored.
+
+### `contributor_snapshots`  (contribution-link observation log, Phase 3)
+`id` (PK), `repository_id` (FK, CASCADE), `developer_id` (FK, CASCADE),
+`captured_at`, `contributions` (cumulative GitHub count). Unique constraint on
+`(repository_id, developer_id, captured_at)`. Written by `sync_contributors`
+for every observed contributor link. The delta between two snapshots of the
+same link is the *observed* activity signal for a window; a single snapshot is
+never recent activity.
+
 ## Data flow
 
 ### Discovery (`discover` command → `RepositoryDiscoveryService.discover`)
@@ -147,7 +162,10 @@ the `update` command exists for full re-observations.
 For every tracked repository: fetch detail, upsert metadata + topics, insert a
 snapshot *if counter state changed*, refresh contributors, refresh stale
 profiles. Developer profiles are re-fetched at most once per
-`PROFILE_REFRESH_DAYS` (tracked via `developers.profile_fetched_at`).
+`PROFILE_REFRESH_DAYS` (tracked via `developers.profile_fetched_at`). Each
+profile fetch writes a `developer_snapshots` row and each contributor sync
+writes `contributor_snapshots` rows, so developer intelligence accumulates
+history without any extra API cost.
 
 ### Snapshot policy
 
@@ -281,6 +299,35 @@ share-with-momentum and share-of-complete-windows (`0.50 / 0.30 / 0.20`) and
 cannot reach `HIGH` below `TOPIC_MIN_REPOS_FOR_HIGH` (10). Confidence is *not*
 a p-value; it exists so thin history is loudly labelled.
 
+### Developer intelligence (Phase 3)
+
+Developer analytics are *observation-driven*, mirroring the Phase 2 snapshot
+policy: developer profile counters (`analytics/developers.py`) and cumulative
+contribution links (`analytics/intelligence.py`) only ever report deltas
+**between real observations**. A missing window end is `None`, never a
+fabricated zero.
+
+- `analytics/history.py` — `ObservationSeries[T]`, an ordered, de-duplicated
+  series over any object with a `captured_at` (the developer-analytics analogue
+  of `SnapshotSeries`), plus the generic `window_delta`.
+- `analytics/developers.py` — `compute_profile_deltas` (followers, following,
+  public_repos over 1d/7d/30d) and `compute_contribution_delta`.
+- `analytics/intelligence.py` — topic relevance (owned + contributed topic
+  repos, per-repo contribution share capped), observed activity (only positive
+  cumulative-count deltas in the window count), ecosystem score (momentum +
+  ownership + breadth + relevance), and the
+  `EMERGING` / `ACTIVE` / `ESTABLISHED` / `QUIET` / `INSUFFICIENT_HISTORY`
+  classification with small-sample and fame protections.
+- `services/intelligence.py` — `DeveloperIntelligenceService.load_dataset`
+  assembles `RepoContext` / `ContributorLink` / `DeveloperContext` from storage
+  and anchors `reference_now` on the newest real `captured_at` observation
+  (wall clock only when the dataset is empty); `build_reports` produces one
+  digest per developer. `filter_reports` implements the `developers` filters.
+- Public contacts are built only from profile fields GitHub exposes on purpose
+  (profile URL, public email, blog, twitter) — nothing scraped or inferred.
+
+See `docs/DEVELOPERS.md` for the formulas and CLI commands.
+
 ## Config knobs
 
 See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
@@ -293,8 +340,11 @@ See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
 - **Contributors are cumulative.** GitHub's `/contributors` endpoint reports
   contribution counts over the repository's whole history, so
   `repository_contributors.contributions` cannot be read as "activity in the
-  last N days". A per-window signal requires GraphQL (commits with dates), which
-  is intentionally out of Phase 1.
+  last N days". Phase 3 leans into this instead of fighting it: the *delta*
+  between two `contributor_snapshots` of the same link is the observed activity
+  signal, and a single snapshot is never treated as activity. A per-window
+  commit-date signal would still require GraphQL, which is intentionally out of
+  scope.
 - **Discovery refreshes known repos cheaply.** Existing repositories are not
   re-fetched in detail during `discover`; use `update` for full refresh +
   snapshots.
@@ -304,10 +354,13 @@ See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
   query/topic scoped, not a full GitHub crawl.
 - **Analytics are snapshot-anchored.** No wall-clock scheduler produces time
   series yet: current services/CLI use the state-change-only
-  `insert_snapshot_if_changed`, so history fills in only when state changed.
-  Periodic observation is *possible* (the storage boundary exposes
+  `insert_snapshot_if_changed`, so repository history fills in only when state
+  changed. Developer history (Phase 3) grows on every `discover`/`update` run:
+  each profile fetch writes a developer snapshot and each contributor sync
+  writes contributor snapshots, whether or not counters changed. Periodic
+  observation on a strict schedule is *possible* (the storage boundary exposes
   `record_observation`), but a scheduler that polls on a schedule is a future
-  pipeline (Phase 3+), not yet built.
+  pipeline, not yet built.
 
 ## Extension points
 
@@ -322,5 +375,9 @@ See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
 - The momentum function is designed to be replaced by richer models
   (e.g. time-series or LLM-assisted summaries) — analytics stay purely
   functions of snapshots, so downstream models don't touch storage.
+- `DeveloperIntelligenceService.load_dataset` produces the entire
+  analytics-ready dataset in one shot; a future web/API frontend can hand
+  richer models the same `DeveloperDataset` without repeating the storage
+  queries, and costlier models slot in behind it without touching storage.
 - A future web/API frontend consumes `storage.repositories` queries; the CLI
   already shares them (`list_repos_with_latest`, `compute_stats`).

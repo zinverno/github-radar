@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -17,7 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from github_radar.domain import Contributor, Developer, Repository, RepositorySnapshot
 from github_radar.storage.models import (
     ContributorRow,
+    ContributorSnapshotRow,
     DeveloperRow,
+    DeveloperSnapshotRow,
     RepositoryRow,
     RepositoryTopicRow,
     SnapshotRow,
@@ -113,6 +116,9 @@ async def sync_profile(
 ) -> tuple[DeveloperRow, bool]:
     """Create or fully refresh a developer's public profile.
 
+    Every profile fetch records one :class:`DeveloperSnapshotRow` at ``now``
+    (idempotent per ``(developer_id, captured_at)``), so follower/repo-count
+    deltas become verifiable history instead of a single instantaneous value.
     ``profile_fetched_at`` is stamped so the update service can throttle
     re-fetching of recently seen profiles.
     """
@@ -142,6 +148,8 @@ async def sync_profile(
         )
         session.add(row)
         await _flush(session)
+        await _record_profile_snapshot(session, row, developer, now=now)
+        await _flush(session)
         return row, True
 
     existing.login = developer.login
@@ -154,7 +162,27 @@ async def sync_profile(
     existing.last_seen_at = now
     existing.profile_fetched_at = now
     await session.flush()
+    await _record_profile_snapshot(session, existing, developer, now=now)
+    await session.flush()
     return existing, False
+
+
+async def _record_profile_snapshot(
+    session: AsyncSession,
+    row: DeveloperRow,
+    developer: Developer,
+    *,
+    now: datetime,
+) -> DeveloperSnapshotRow:
+    """Upsert one profile observation at ``now`` (idempotent per instant)."""
+    return await add_developer_snapshot(
+        session,
+        developer_id=row.id,
+        captured_at=now,
+        followers=developer.followers,
+        following=developer.following,
+        public_repos=developer.public_repos,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -320,21 +348,33 @@ async def set_repository_topics(
 # Contributors
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class ContributorSyncResult:
+    """Outcome of one contributor re-observation for a repository."""
+
+    developers_created: int
+    snapshots_written: int
+
+
 async def sync_contributors(
     session: AsyncSession,
     repo_row: RepositoryRow,
     contributors: Sequence[Contributor],
     *,
     now: datetime | None = None,
-) -> int:
-    """Upsert contributor associations for a repository.
+) -> ContributorSyncResult:
+    """Upsert contributor associations AND record one observation per link.
 
     GitHub only exposes a *cumulative* contribution count per contributor over
     the repository's whole history. ``contributions`` is therefore stored
-    verbatim and must never be interpreted as recent activity.
+    verbatim and must never be interpreted as recent activity. Every re-fetch
+    additionally records a :class:`ContributorSnapshotRow` at ``now``
+    (idempotent per ``(repository, developer, captured_at)``) so the cumulative
+    count can be turned into a truthful delta between observations later.
     """
     now = now or utcnow()
     created = 0
+    snapshots_written = 0
     for contributor in contributors:
         developer_row, dev_created = await note_contributor(
             session, contributor.developer, now=now
@@ -362,8 +402,259 @@ async def sync_contributors(
         else:
             link.contributions = contributor.contributions
             link.last_seen_at = now
+        await record_contributor_snapshot(
+            session,
+            repository_id=repo_row.id,
+            developer_id=developer_row.id,
+            captured_at=now,
+            contributions=contributor.contributions,
+        )
+        snapshots_written += 1
     await session.flush()
-    return created
+    return ContributorSyncResult(
+        developers_created=created, snapshots_written=snapshots_written
+    )
+
+
+# ---------------------------------------------------------------------------
+# Developer & contributor observations (append-only history)
+# ---------------------------------------------------------------------------
+
+async def add_developer_snapshot(
+    session: AsyncSession,
+    *,
+    developer_id: int,
+    captured_at: datetime,
+    followers: int | None,
+    following: int | None,
+    public_repos: int | None,
+) -> DeveloperSnapshotRow:
+    """Persist one developer profile observation at ``captured_at``.
+
+    Idempotent per ``(developer_id, captured_at)``: an observation at an
+    already-captured instant replaces that row; a new instant appends. History
+    from other instants is never touched. The unique constraint enforces the
+    same-instant guarantee at the database level.
+    """
+    returning = (
+        select(DeveloperSnapshotRow.id)
+        .where(
+            DeveloperSnapshotRow.developer_id == developer_id,
+            DeveloperSnapshotRow.captured_at == captured_at,
+        )
+        .limit(1)
+    )
+    row_id = (await session.execute(returning)).scalar_one_or_none()
+    if row_id is None:
+        row = DeveloperSnapshotRow(
+            developer_id=developer_id,
+            captured_at=captured_at,
+            followers=followers,
+            following=following,
+            public_repos=public_repos,
+        )
+        session.add(row)
+    else:
+        existing = await session.get(DeveloperSnapshotRow, row_id)
+        assert existing is not None
+        existing.followers = followers
+        existing.following = following
+        existing.public_repos = public_repos
+        row = existing
+    await session.flush()
+    return row
+
+
+async def record_contributor_snapshot(
+    session: AsyncSession,
+    *,
+    repository_id: int,
+    developer_id: int,
+    captured_at: datetime,
+    contributions: int,
+) -> ContributorSnapshotRow:
+    """Persist one contributor observation at ``captured_at``.
+
+    Same-instant idempotency is per ``(repository_id, developer_id,
+    captured_at)``; a new instant appends and historical rows are never
+    overwritten. ``contributions`` is GitHub's cumulative value, verbatim.
+    """
+    returning = (
+        select(ContributorSnapshotRow.id)
+        .where(
+            ContributorSnapshotRow.repository_id == repository_id,
+            ContributorSnapshotRow.developer_id == developer_id,
+            ContributorSnapshotRow.captured_at == captured_at,
+        )
+        .limit(1)
+    )
+    row_id = (await session.execute(returning)).scalar_one_or_none()
+    if row_id is None:
+        row = ContributorSnapshotRow(
+            repository_id=repository_id,
+            developer_id=developer_id,
+            captured_at=captured_at,
+            contributions=contributions,
+        )
+        session.add(row)
+    else:
+        existing = await session.get(ContributorSnapshotRow, row_id)
+        assert existing is not None
+        existing.contributions = contributions
+        row = existing
+    await session.flush()
+    return row
+
+
+async def developer_snapshots_for(
+    session: AsyncSession, developer_id: int
+) -> Sequence[DeveloperSnapshotRow]:
+    """A developer's profile observation history, oldest first."""
+    result = await session.execute(
+        select(DeveloperSnapshotRow)
+        .where(DeveloperSnapshotRow.developer_id == developer_id)
+        .order_by(DeveloperSnapshotRow.captured_at.asc())
+    )
+    return result.scalars().all()
+
+
+async def contributor_snapshots_for_relationship(
+    session: AsyncSession,
+    *,
+    repository_id: int,
+    developer_id: int,
+) -> Sequence[ContributorSnapshotRow]:
+    """One relationship's observation history, oldest first."""
+    result = await session.execute(
+        select(ContributorSnapshotRow)
+        .where(
+            ContributorSnapshotRow.repository_id == repository_id,
+            ContributorSnapshotRow.developer_id == developer_id,
+        )
+        .order_by(ContributorSnapshotRow.captured_at.asc())
+    )
+    return result.scalars().all()
+
+
+async def contributor_snapshots_for_repository(
+    session: AsyncSession, repository_id: int
+) -> Sequence[ContributorSnapshotRow]:
+    """All contributor observations for one repository, oldest first."""
+    result = await session.execute(
+        select(ContributorSnapshotRow)
+        .where(ContributorSnapshotRow.repository_id == repository_id)
+        .order_by(ContributorSnapshotRow.captured_at.asc())
+    )
+    return result.scalars().all()
+
+
+async def contributor_snapshots_for_developer(
+    session: AsyncSession, developer_id: int
+) -> Sequence[ContributorSnapshotRow]:
+    """All contributor observations for one developer, oldest first."""
+    result = await session.execute(
+        select(ContributorSnapshotRow)
+        .where(ContributorSnapshotRow.developer_id == developer_id)
+        .order_by(ContributorSnapshotRow.captured_at.asc())
+    )
+    return result.scalars().all()
+
+
+async def contributor_links_for_developer(
+    session: AsyncSession, developer_id: int
+) -> Sequence[RepositoryRow]:
+    """The tracked repositories a developer contributes to."""
+    result = await session.execute(
+        select(RepositoryRow)
+        .join(ContributorRow, ContributorRow.repository_id == RepositoryRow.id)
+        .where(ContributorRow.developer_id == developer_id)
+        .order_by(RepositoryRow.full_name.asc())
+    )
+    return result.scalars().all()
+
+
+@dataclass(frozen=True)
+class ContributorLinkRecord:
+    """One contributor association with its current cumulative value."""
+
+    repository_id: int
+    developer_id: int
+    contributions: int
+    developer_login: str
+    developer_github_id: int
+
+
+async def list_contributor_links(
+    session: AsyncSession,
+) -> Sequence[ContributorLinkRecord]:
+    """Every ``repository_contributors`` row joined with its developer login."""
+    result = await session.execute(
+        select(ContributorRow).order_by(
+            ContributorRow.developer_id.asc(),
+            ContributorRow.repository_id.asc(),
+        )
+    )
+    return [
+        ContributorLinkRecord(
+            repository_id=row.repository_id,
+            developer_id=row.developer_id,
+            contributions=row.contributions,
+            developer_login=row.developer.login,
+            developer_github_id=row.developer.github_id,
+        )
+        for row in result.scalars().all()
+    ]
+
+
+async def all_contributor_snapshots(
+    session: AsyncSession,
+) -> Sequence[ContributorSnapshotRow]:
+    """Every contributor observation in the dataset, oldest first."""
+    result = await session.execute(
+        select(ContributorSnapshotRow).order_by(
+            ContributorSnapshotRow.captured_at.asc()
+        )
+    )
+    return result.scalars().all()
+
+
+async def all_developer_snapshots(
+    session: AsyncSession,
+) -> Sequence[DeveloperSnapshotRow]:
+    """Every developer profile observation in the dataset, oldest first."""
+    result = await session.execute(
+        select(DeveloperSnapshotRow).order_by(
+            DeveloperSnapshotRow.captured_at.asc()
+        )
+    )
+    return result.scalars().all()
+
+
+async def get_developers_by_id(
+    session: AsyncSession,
+    developer_ids: Sequence[int],
+) -> Sequence[DeveloperRow]:
+    """Developer rows for ``developer_ids`` (order not preserved)."""
+    if not developer_ids:
+        return []
+    result = await session.execute(
+        select(DeveloperRow).where(DeveloperRow.id.in_(developer_ids))
+    )
+    return result.scalars().all()
+
+
+async def newest_observation_at(session: AsyncSession) -> datetime | None:
+    """The newest contributor/repository snapshot ``captured_at`` dataset-wide.
+
+    Used as the deterministic ``reference_now`` anchor for developer analytics:
+    never the wall clock, always a real observed instant.
+    """
+    newest = await session.scalar(
+        select(func.max(ContributorSnapshotRow.captured_at))
+    )
+    if newest is None:
+        newest = await session.scalar(select(func.max(SnapshotRow.captured_at)))
+    return newest
 
 
 # ---------------------------------------------------------------------------

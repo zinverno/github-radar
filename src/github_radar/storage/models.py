@@ -20,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from github_radar.domain import RepositorySnapshot
+from github_radar.domain import ContributorSnapshot, DeveloperSnapshot, RepositorySnapshot
 
 
 class Base(DeclarativeBase):
@@ -155,6 +155,75 @@ class ContributorRow(Base):
     developer: Mapped[DeveloperRow] = relationship(lazy="joined")
 
 
+class DeveloperSnapshotRow(Base):
+    __tablename__ = "developer_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "developer_id",
+            "captured_at",
+            name="uq_developer_snapshots_dev_captured",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    developer_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("developers.id", ondelete="CASCADE"), nullable=False
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    followers: Mapped[int | None] = mapped_column(Integer)
+    following: Mapped[int | None] = mapped_column(Integer)
+    public_repos: Mapped[int | None] = mapped_column(Integer)
+
+    developer: Mapped[DeveloperRow] = relationship(lazy="joined")
+
+    def to_domain(self) -> DeveloperSnapshot:
+        return DeveloperSnapshot(
+            developer_id=self.developer_id,
+            captured_at=self.captured_at,
+            followers=self.followers,
+            following=self.following,
+            public_repos=self.public_repos,
+        )
+
+
+class ContributorSnapshotRow(Base):
+    __tablename__ = "repository_contributor_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "repository_id",
+            "developer_id",
+            "captured_at",
+            name="uq_contributor_snapshots_repo_dev_captured",
+        ),
+        Index(
+            "ix_contributor_snapshots_developer_captured",
+            "developer_id",
+            "captured_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    repository_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
+    )
+    developer_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("developers.id", ondelete="CASCADE"), nullable=False
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    contributions: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    repository: Mapped[RepositoryRow] = relationship(lazy="joined")
+    developer: Mapped[DeveloperRow] = relationship(lazy="joined")
+
+    def to_domain(self) -> ContributorSnapshot:
+        return ContributorSnapshot(
+            repository_id=self.repository_id,
+            developer_id=self.developer_id,
+            captured_at=self.captured_at,
+            contributions=self.contributions,
+        )
+
+
 class SnapshotRow(Base):
     __tablename__ = "repository_snapshots"
     __table_args__ = (
@@ -194,7 +263,9 @@ class SnapshotRow(Base):
 __all__ = [
     "Base",
     "ContributorRow",
+    "ContributorSnapshotRow",
     "DeveloperRow",
+    "DeveloperSnapshotRow",
     "RepositoryRow",
     "RepositoryTopicRow",
     "SnapshotRow",

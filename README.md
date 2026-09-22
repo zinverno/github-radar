@@ -8,6 +8,11 @@ repositories, topics, contributors and developer profiles in PostgreSQL.
 usable: time-series snapshots, an explainable momentum score, repository trend
 classification, topic aggregation and a confidence model — all exposed through
 `trending`, `topics` and `topic` CLI commands (see `docs/TRENDING.md`).
+**Phase 3** extends the observation policy to developers and turns contributors
+into an intelligence surface: per-developer profile and contribution history,
+topic relevance, observed activity, ecosystem score and an emerging-developer
+classification, exposed through `developers`, `developer` and
+`emerging-developers` (see `docs/DEVELOPERS.md`).
 
 > github-radar is **not** a GitHub Trending scraper. It only ever talks to the
 > official GitHub REST API. The real long-term asset is its own historical
@@ -55,6 +60,33 @@ classification, topic aggregation and a confidence model — all exposed through
   unique `(repository_id, captured_at)` constraint protects the series.
 - All analytics are **reproducible**: they are pure functions of snapshot
   history plus an explicit reference instant — the wall clock is never read.
+
+## What Phase 3 adds
+
+- **Developer profile history** — an append-only `developer_snapshots` log
+  (followers, following, public_repos per `captured_at`), written on every
+  profile fetch; deltas computed over 1d / 7d / 30d windows between real
+  observations.
+- **Contributor observation history** — an append-only `contributor_snapshots`
+  log per repository↔developer link, written on every contributor sync. Since
+  GitHub's contribution count is *cumulative*, activity is the **observed
+  delta** between two observations of the same link; a single observation is
+  never treated as recent activity.
+- **Topic relevance** — how connected a developer is to a topic's tracked
+  repositories through owning and contributing, with per-repo contribution
+  share capped so one huge repository can't dominate.
+- **Activity** — observed positive contribution movement inside the tracked
+  ecosystem over a window, plus ecosystem score (momentum, ownership, breadth).
+- **Emerging classification** — every tracked developer is labelled
+  `EMERGING` / `ACTIVE` / `ESTABLISHED` / `QUIET` / `INSUFFICIENT_HISTORY` from
+  a deterministic weighted score with small-sample and fame protections (a lone
+  +1 contribution can never be "emerging").
+- **Public contacts** — surfaced only from profile fields GitHub exposes on
+  purpose (profile URL, public email, blog, twitter); nothing is scraped or
+  inferred.
+- All of it is exposed through `developers`, `developer LOGIN` and
+  `emerging-developers`, and each `topic` result now lists the developers
+  relevant to it.
 
 ## Requirements
 
@@ -147,9 +179,14 @@ uv run github-radar discover --help
 | `github-radar trending --limit 10` | rank repositories by momentum score |
 | `github-radar topics --limit 10` | aggregate topics by coverage & momentum |
 | `github-radar topic mcp --limit 10` | list repositories for one topic |
+| `github-radar developers --sort activity` | list tracked developers with intelligence scores |
+| `github-radar developer adalovelace` | full profile, activity and emerging digest for one developer |
+| `github-radar emerging-developers` | developers classified EMERGING, most-rising first |
 | `github-radar rate-limit` | current GitHub API quota |
 
-See `docs/TRENDING.md` for the exact formulas behind the Phase 2 commands.
+See `docs/TRENDING.md` for the exact formulas behind the Phase 2 commands and
+`docs/DEVELOPERS.md` for the developer-intelligence formulas behind the Phase 3
+commands.
 
 ### Example discovery
 
@@ -219,6 +256,9 @@ uv run mypy .
   strategy, extension points.
 - `docs/TRENDING.md` — the Phase 2 analytics: momentum, trends, confidence,
   topic aggregation, and the `trending` / `topics` / `topic` CLI.
+- `docs/DEVELOPERS.md` — the Phase 3 developer intelligence: observation
+  policy, topic relevance, activity, ecosystem score, emerging classification,
+  contacts, and the `developers` / `developer` / `emerging-developers` CLI.
 
 ## License
 

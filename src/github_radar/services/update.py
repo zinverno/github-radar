@@ -23,7 +23,10 @@ class UpdateReport:
     repositories_refreshed: int = 0
     snapshots_inserted: int = 0
     contributors_added: int = 0
+    contributor_relationships_observed: int = 0
     developer_profiles_fetched: int = 0
+    developer_profiles_reused: int = 0
+    developer_snapshots_written: int = 0
 
 
 class RepositoryUpdateService:
@@ -83,20 +86,28 @@ class RepositoryUpdateService:
                 detail.name,
                 limit=self.contributors_limit,
             )
-            report.contributors_added += await storage.sync_contributors(
+            sync_result = await storage.sync_contributors(
                 self.session, current, contributors, now=now
             )
+            report.contributors_added += sync_result.developers_created
+            report.contributor_relationships_observed += sync_result.snapshots_written
             await self.session.commit()
 
-            report.developer_profiles_fetched += await dev_sync.sync(contributors)
+            profile_stats = await dev_sync.sync(contributors)
+            report.developer_profiles_fetched += profile_stats.fetched
+            report.developer_profiles_reused += profile_stats.reused
+            report.developer_snapshots_written += profile_stats.fetched
 
         logger.info(
             "Update run finished: %d refreshed, %d new snapshots, %d contributor "
-            "rows added, %d profiles fetched",
+            "rows added, %d contributor relationships observed, %d profiles "
+            "fetched, %d profiles reused",
             report.repositories_refreshed,
             report.snapshots_inserted,
             report.contributors_added,
+            report.contributor_relationships_observed,
             report.developer_profiles_fetched,
+            report.developer_profiles_reused,
         )
         return report
 

@@ -1,6 +1,6 @@
 """Analytics package: deterministic, snapshot-anchored ecosystem scoring.
 
-Everything here is a pure function of ``RepositorySnapshot`` history plus an
+Everything here is a pure function of (developer) snapshot history plus an
 explicit ``reference_now`` — the wall clock is never consulted, so results are
 reproducible between runs without a new snapshot.
 
@@ -29,6 +29,20 @@ Time series
 Recency
     RecencyMetrics, compute_recency, recency_score, days_between
     Deterministic age/staleness relative to ``reference_now``.
+Developer history
+    ObservationSeries, ObservationDelta, window_delta
+    Ordered, de-duplicated observation series and windowed observation deltas.
+Developer analytics
+    DeveloperProfileMetrics, ProfileFieldDelta, ContributionDelta,
+    compute_profile_deltas, compute_contribution_delta
+    Profile counter deltas (followers, public_repos, ...) and cumulative
+    contribution deltas between real observations.
+Developer intelligence
+    TopicRelevance, DeveloperActivity, EcosystemScore, EmergingDeveloper,
+    compute_topic_relevance, compute_activity, compute_ecosystem_score,
+    compute_emerging, damped_delta
+    Deterministic developer scores for topic relevance, observed activity,
+    ecosystem connection and the emerging label/score.
 """
 
 from __future__ import annotations
@@ -55,6 +69,50 @@ from github_radar.analytics.confidence import (
     level_for_score,
     repo_window_confidence,
     topic_confidence,
+)
+from github_radar.analytics.developers import (
+    PROFILE_DELTA_WINDOWS_DAYS,
+    ContributionDelta,
+    ContributionHistory,
+    DeveloperProfileMetrics,
+    ProfileFieldDelta,
+    compute_contribution_delta,
+    compute_profile_deltas,
+)
+from github_radar.analytics.history import (
+    ObservationDelta,
+    ObservationSeries,
+    window_delta,
+)
+from github_radar.analytics.intelligence import (
+    ACTIVITY_LABEL_THRESHOLD,
+    ACTIVITY_SCALE,
+    ACTIVITY_WEIGHTS,
+    ECOSYSTEM_BREADTH_FLOOR,
+    ECOSYSTEM_WEIGHTS,
+    EMERGING_MIN_CONFIDENCE,
+    EMERGING_MOMENTUM,
+    EMERGING_THRESHOLD,
+    EMERGING_WEIGHTS,
+    NEWCOMER_DAYS,
+    OWNED_FLOOR,
+    RELEVANCE_REPO_FLOOR,
+    RELEVANCE_WEIGHTS,
+    REQUIRED_EVIDENCE,
+    SHARE_CAP,
+    ContributorLink,
+    DeveloperActivity,
+    DeveloperContext,
+    EcosystemScore,
+    EmergingDeveloper,
+    EmergingLabel,
+    RepoContext,
+    TopicRelevance,
+    compute_activity,
+    compute_ecosystem_score,
+    compute_emerging,
+    compute_topic_relevance,
+    damped_delta,
 )
 from github_radar.analytics.metrics import (
     DELTA_FIELDS,
@@ -102,11 +160,29 @@ from github_radar.analytics.trends import (
 )
 
 __all__ = [
+    "ACTIVITY_LABEL_THRESHOLD",
+    "ACTIVITY_SCALE",
+    "ACTIVITY_WEIGHTS",
     "Confidence",
     "ConfidenceLevel",
+    "ContributionDelta",
+    "ContributionHistory",
+    "ContributorLink",
     "DECLINING_GROWTH_PCT",
     "DELTA_FIELDS",
     "DELTA_WINDOWS_DAYS",
+    "DeveloperActivity",
+    "DeveloperContext",
+    "DeveloperProfileMetrics",
+    "ECOSYSTEM_BREADTH_FLOOR",
+    "ECOSYSTEM_WEIGHTS",
+    "EMERGING_MIN_CONFIDENCE",
+    "EMERGING_MOMENTUM",
+    "EMERGING_THRESHOLD",
+    "EMERGING_WEIGHTS",
+    "EmergingDeveloper",
+    "EmergingLabel",
+    "EcosystemScore",
     "FieldDelta",
     "HIGH_CONFIDENCE_THRESHOLD",
     "INACTIVE_RECENCY",
@@ -115,13 +191,24 @@ __all__ = [
     "MEDIUM_CONFIDENCE_THRESHOLD",
     "MIN_SNAPSHOTS_FOR_FULL_HISTORY",
     "MomentumScore",
+    "NEWCOMER_DAYS",
     "NearestMatch",
+    "OWNED_FLOOR",
+    "ObservationDelta",
+    "ObservationSeries",
+    "ProfileFieldDelta",
+    "PROFILE_DELTA_WINDOWS_DAYS",
     "RECENCY_HALF_LIFE_DAYS",
+    "RELEVANCE_REPO_FLOOR",
+    "RELEVANCE_WEIGHTS",
+    "REQUIRED_EVIDENCE",
     "RISING_GROWTH_PCT",
     "RecencyMetrics",
+    "RepoContext",
     "RepoMetrics",
     "RepoRanking",
     "RepositoryReport",
+    "SHARE_CAP",
     "SnapshotSeries",
     "TOPIC_MIN_REPOS_FOR_HIGH",
     "TOPIC_W_COUNT",
@@ -132,6 +219,7 @@ __all__ = [
     "TopicAggregate",
     "TopicConfidence",
     "TopicConfidenceRule",
+    "TopicRelevance",
     "Trend",
     "TrendClass",
     "W_COUNT",
@@ -141,11 +229,18 @@ __all__ = [
     "WINDOW_DAYS",
     "aggregate_topics",
     "classify_trend",
+    "compute_activity",
+    "compute_contribution_delta",
+    "compute_ecosystem_score",
+    "compute_emerging",
     "compute_metrics",
     "compute_momentum",
+    "compute_profile_deltas",
     "compute_recency",
+    "compute_topic_relevance",
     "confidence_level_for_repo_window",
     "confidence_level_for_topic",
+    "damped_delta",
     "days_between",
     "format_confidence",
     "level_for_score",
@@ -155,4 +250,5 @@ __all__ = [
     "sorted_snapshots",
     "topic_confidence",
     "utcnow_dt",
+    "window_delta",
 ]

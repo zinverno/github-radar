@@ -64,6 +64,84 @@ class Contributor:
 
 
 @dataclass(frozen=True, slots=True)
+class DeveloperSnapshot:
+    """An append-only observation of a developer's public profile counters.
+
+    ``captured_at`` marks when we fetched the profile, not any GitHub-supplied
+    timestamp. Counters are the *observed* values at that instant; profile
+    history is the raw source of truth for follower/repo-count deltas. The
+    current :class:`Developer` row may hold the latest values for convenience,
+    but historical rows are never overwritten.
+
+    Only public, non-inferred counters are stored here.
+    """
+
+    developer_id: int
+    captured_at: datetime
+    followers: int | None
+    following: int | None
+    public_repos: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ContributorSnapshot:
+    """An append-only observation of a developer/repository contribution link.
+
+    The ``contributions`` value is GitHub's *cumulative* contribution count for
+    the developer over the whole history of the repository at ``captured_at``.
+    A change between two snapshots is a genuine positive/negative delta over the
+    window; a single snapshot is never "recent activity".
+    """
+
+    repository_id: int
+    developer_id: int
+    captured_at: datetime
+    contributions: int
+
+
+@dataclass(frozen=True, slots=True)
+class PublicContactMethods:
+    """The public contact channels a developer has exposed on GitHub.
+
+    Built **only** from fields the GitHub profile API returns on purpose:
+    their GitHub profile URL, the public email field, the blog/website field and
+    the twitter username. Nothing is scraped, inferred or extrapolated here, and
+    private contact data never enters this structure.
+    """
+
+    github: str | None
+    public_email: str | None
+    website: str | None
+    twitter: str | None
+
+    @property
+    def available(self) -> tuple[str, ...]:
+        """Names of the contact channels that are actually exposed."""
+        return tuple(
+            name
+            for name, value in (
+                ("github", self.github),
+                ("public_email", self.public_email),
+                ("website", self.website),
+                ("twitter", self.twitter),
+            )
+            if value is not None and value.strip()
+        )
+
+    @classmethod
+    def from_developer(cls, developer: Developer) -> PublicContactMethods:
+        github = developer.html_url
+        if github is None or not github.strip():
+            github = f"https://github.com/{developer.login}"
+        return cls(
+            github=github,
+            public_email=developer.public_email,
+            website=developer.blog,
+            twitter=developer.twitter_username,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Repository:
     """A repository observed through the GitHub API."""
 
@@ -138,7 +216,10 @@ class RepositorySnapshot:
 
 __all__ = [
     "Contributor",
+    "ContributorSnapshot",
     "Developer",
+    "DeveloperSnapshot",
+    "PublicContactMethods",
     "Repository",
     "RepositorySnapshot",
     "Topic",

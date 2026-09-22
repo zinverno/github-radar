@@ -1,13 +1,19 @@
 """The github-radar Typer CLI.
 
 Commands:
-    init-db        create database schema via Alembic migrations
-    discover       search GitHub and store repositories
-    update         re-observe tracked repositories
-    repos          list tracked repositories
-    repo           show one repository in detail
-    stats          dataset statistics
-    rate-limit     show current GitHub API quota
+    init-db             create database schema via Alembic migrations
+    discover            search GitHub and store repositories
+    update              re-observe tracked repositories
+    repos               list tracked repositories
+    repo                show one repository in detail
+    stats               dataset statistics
+    trending            rank tracked repositories by momentum
+    topics              aggregate tracked topics
+    topic               topic repositories + developer intelligence
+    developers          list developer intelligence (relevance/activity/e…)   
+    developer           show one developer's full intelligence digest
+    emerging-developers list developers classified EMERGING
+    rate-limit          show current GitHub API quota
 """
 
 from __future__ import annotations
@@ -26,9 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from github_radar.analytics import (
     WEIGHTS,
+    DeveloperProfileMetrics,
     FieldDelta,
+    ProfileFieldDelta,
     RepositoryReport,
     aggregate_topics,
+    compute_contribution_delta,
     compute_metrics,
     compute_momentum,
     rank_repositories,
@@ -40,7 +49,12 @@ from github_radar.github import (
     GitHubConfigurationError,
     RateLimitExceeded,
 )
-from github_radar.services import RepositoryUpdateService
+from github_radar.services import (
+    DeveloperDataset,
+    DeveloperIntelligenceService,
+    DeveloperReport,
+    RepositoryUpdateService,
+)
 from github_radar.storage import repositories as storage
 from github_radar.storage.db import make_engine, make_session_factory
 
@@ -259,7 +273,10 @@ async def _discover_run(
     engine, session = await _engine_and_session(settings)
     try:
         service = RepositoryDiscoveryService(
-            client, session, contributors_limit=contributors_limit
+            client,
+            session,
+            contributors_limit=contributors_limit,
+            refresh_days=settings.profile_refresh_days,
         )
         report = await service.discover(
             query=query,
@@ -312,7 +329,9 @@ async def _update_run(settings: Settings, *, limit: int | None) -> None:
     client = _make_client(settings, require_auth=True)
     engine, session = await _engine_and_session(settings)
     try:
-        report = await RepositoryUpdateService(client, session).update(limit=limit)
+        report = await RepositoryUpdateService(
+            client, session, refresh_days=settings.profile_refresh_days
+        ).update(limit=limit)
         _print_table(
             ["Metric", "Value"],
             [
@@ -705,6 +724,551 @@ async def _topic_run(settings: Settings, *, topic: str, limit: int) -> None:
                     r.confidence,
                 ]
                 for r in ranked[:limit]
+            ],
+        )
+
+        _dataset, reports = await _build_developer_reports(session)
+        by_topic: list[tuple[DeveloperReport, float]] = []
+        for report in reports:
+            relevance = report.relevance_for(topic_name)
+            if relevance is not None:
+                by_topic.append((report, relevance.score))
+        by_topic.sort(key=lambda item: item[1], reverse=True)
+        if by_topic:
+            _print_table(
+                ["Developer", "Followers", "Relevance", "Activity", "Emerging",
+                 "Confidence"],
+                [
+                    [
+                        report.login,
+                        report.followers,
+                        relevance_score,
+                        (
+                            report.activity.score
+                            if report.activity is not None
+                            and report.activity.available
+                            else None
+                        ),
+                        report.emerging.label,
+                        f"{report.emerging.confidence_level} "
+                        f"({report.emerging.confidence_score:.2f})",
+                    ]
+                    for report, relevance_score in by_topic[:limit]
+                ],
+            )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# developers / developer / emerging-developers
+# ---------------------------------------------------------------------------
+
+VALID_WINDOWS_DAYS = (1, 7, 30)
+
+
+def _parse_window_days(window: str) -> int:
+    """Parse ``1d``/``7d``/``30d`` (bare integers are accepted too)."""
+    raw = window.strip().lower()
+    value = raw[:-1] if raw.endswith("d") else raw
+    try:
+        days = int(value)
+    except ValueError:
+        typer.secho(
+            f"Invalid --window value: {window!r} " f"(use one of 1d, 7d, 30d).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if days not in VALID_WINDOWS_DAYS:
+        typer.secho(
+            f"--window must be one of 1d, 7d, 30d (got {window!r}).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return days
+
+
+def _relevance_value(report: DeveloperReport, topic: str | None) -> float | None:
+    if topic is not None:
+        relevance = report.relevance_for(topic)
+        return relevance.score if relevance is not None else None
+    scores = [r.score for r in report.topic_relevances]
+    return max(scores) if scores else None
+
+
+def _activity_score(report: DeveloperReport) -> float:
+    activity = report.activity
+    if activity is not None and activity.available:
+        return activity.score
+    return -1.0
+
+
+def _ecosystem_score(report: DeveloperReport) -> float:
+    return report.ecosystem.score if report.ecosystem is not None else -1.0
+
+
+def _relevance_sort_value(report: DeveloperReport, topic: str | None) -> float:
+    value = _relevance_value(report, topic)
+    return value if value is not None else -1.0
+
+
+async def _build_developer_reports(
+    session: AsyncSession, *, window_days: int = 7
+) -> tuple[DeveloperDataset, tuple[DeveloperReport, ...]]:
+    service = DeveloperIntelligenceService(session)
+    dataset = await service.load_dataset()
+    reports = service.build_reports(dataset, window_days=window_days)
+    return dataset, reports
+
+
+@app.command("developers")
+def developers_command(
+    topic: str | None = typer.Option(
+        None, "--topic", "-t", help="Only developers relevant to this topic."
+    ),
+    sort: str = typer.Option(
+        "relevance",
+        "--sort",
+        help="Sort field: relevance, activity, ecosystem, emerging, followers.",
+    ),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    limit: int = typer.Option(10, "--limit", "-n", help="How many to show."),
+    min_confidence: float | None = typer.Option(
+        None, "--min-confidence", help="Minimum emerging confidence (0..1)."
+    ),
+    min_followers: int | None = typer.Option(
+        None, "--min-followers", help="Minimum current followers."
+    ),
+    has_public_contact: bool = typer.Option(
+        False,
+        "--has-public-contact",
+        help="Only developers exposing at least one public contact.",
+    ),
+    repository: str | None = typer.Option(
+        None, "--repository", help="Only developers contributing to a repository."
+    ),
+    language: str | None = typer.Option(
+        None, "--language", help="Only developers associated with this language."
+    ),
+) -> None:
+    """List tracked developers with their intelligence scores."""
+    settings = get_settings()
+    _run(
+        _developers_run(
+            settings,
+            topic=topic,
+            sort=sort,
+            window=_parse_window_days(window),
+            limit=limit,
+            min_confidence=min_confidence,
+            min_followers=min_followers,
+            has_public_contact=has_public_contact,
+            repository=repository,
+            language=language,
+        )
+    )
+
+
+async def _developers_run(
+    settings: Settings,
+    *,
+    topic: str | None,
+    sort: str,
+    window: int,
+    limit: int,
+    min_confidence: float | None,
+    min_followers: int | None,
+    has_public_contact: bool,
+    repository: str | None,
+    language: str | None,
+) -> None:
+    if sort not in ("relevance", "activity", "ecosystem", "emerging", "followers"):
+        typer.secho(
+            f"--sort must be one of relevance, activity, ecosystem, emerging, "
+            f"followers (got {sort!r}).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if min_confidence is not None and not 0.0 <= min_confidence <= 1.0:
+        typer.secho(
+            f"--min-confidence must be between 0 and 1 (got {min_confidence}).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    topic = storage.normalize_topic(topic) if topic else None
+
+    engine, session = await _engine_and_session(settings)
+    try:
+        _dataset, reports = await _build_developer_reports(
+            session, window_days=window
+        )
+        kept = [
+            report
+            for report in reports
+            if _passes_filters(
+                report,
+                topic=topic,
+                language=language,
+                repository=repository,
+                min_followers=min_followers,
+                min_confidence=min_confidence,
+                has_public_contact=has_public_contact,
+            )
+        ]
+        if sort == "followers":
+            kept.sort(key=lambda r: (r.followers is not None, r.followers), reverse=True)
+        elif sort == "activity":
+            kept.sort(key=lambda r: -_activity_score(r))
+        elif sort == "ecosystem":
+            kept.sort(key=lambda r: -_ecosystem_score(r))
+        elif sort == "emerging":
+            kept.sort(key=lambda r: -r.emerging.score)
+        else:
+            kept.sort(key=lambda r: -_relevance_sort_value(r, topic))
+
+        if not kept:
+            print("No developers matched the filters — run 'github-radar update' "
+                  "or relax the filters.")
+            return
+        _print_table(
+            ["Login", "Followers", "Relevance", "Activity", "Ecosystem",
+             "Emerging", "Confidence"],
+            [
+                [
+                    report.login,
+                    report.followers,
+                    _relevance_value(report, topic),
+                    (
+                        report.activity.score
+                        if report.activity is not None and report.activity.available
+                        else None
+                    ),
+                    report.ecosystem.score if report.ecosystem is not None else None,
+                    report.emerging.label,
+                    f"{report.emerging.confidence_level} "
+                    f"({report.emerging.confidence_score:.2f})",
+                ]
+                for report in kept[:limit]
+            ],
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+def _passes_filters(
+    report: DeveloperReport,
+    *,
+    topic: str | None,
+    language: str | None,
+    repository: str | None,
+    min_followers: int | None,
+    min_confidence: float | None,
+    has_public_contact: bool,
+) -> bool:
+    if topic is not None and report.relevance_for(topic) is None:
+        return False
+    if language is not None:
+        langs = {lang.lower() for lang in report.languages if lang is not None}
+        if language.lower() not in langs:
+            return False
+    if repository is not None:
+        wanted = repository.lower()
+        if not any(wanted in name.lower() for name in report.associated_repositories):
+            return False
+    if min_followers is not None:
+        if report.followers is None or report.followers < min_followers:
+            return False
+    if min_confidence is not None:
+        if report.emerging.confidence_score < min_confidence:
+            return False
+    if has_public_contact and not report.public_contacts.available:
+        return False
+    return True
+
+
+@app.command("developer")
+def developer_command(
+    login: str = typer.Argument(..., help="GitHub login of the developer."),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+) -> None:
+    """Show one developer's profile, activity and emerging classification."""
+    settings = get_settings()
+    _run(
+        _developer_run(
+            settings, login=login.strip().lower(), window=_parse_window_days(window)
+        )
+    )
+
+
+async def _developer_run(
+    settings: Settings, *, login: str, window: int
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        dataset, reports = await _build_developer_reports(
+            session, window_days=window
+        )
+        report = next(
+            (report for report in reports if report.login.lower() == login),
+            None,
+        )
+        if report is None:
+            typer.secho(
+                f"No tracked developer named {login!r}.\n"
+                f"  Run 'github-radar update' to observe contributor profiles.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+        _print_developer_report(dataset, report, window_days=window)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+def _profile_delta(
+    metrics: DeveloperProfileMetrics | None,
+    field_name: str,
+    days: int,
+) -> ProfileFieldDelta | None:
+    if metrics is None:
+        return None
+    if field_name == "followers":
+        return metrics.followers_delta(days)
+    if field_name == "following":
+        return metrics.following_delta(days)
+    return metrics.public_repos_delta(days)
+
+
+def _print_developer_report(
+    dataset: DeveloperDataset,
+    report: DeveloperReport,
+    *,
+    window_days: int,
+) -> None:
+    contacts = report.public_contacts
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["login", report.login],
+            ["name", report.name or "—"],
+            ["followers", report.followers],
+            ["first seen", report.first_seen_at],
+            ["associated repositories", report.associations],
+            ["public contacts",
+             ", ".join(contacts.available) if contacts.available else "—"],
+        ],
+    )
+
+    if contacts.available:
+        _print_table(
+            ["Channel", "Value"],
+            [
+                ["github", contacts.github],
+                ["public_email", contacts.public_email],
+                ["website", contacts.website],
+                ["twitter", contacts.twitter],
+            ],
+        )
+
+    m = report.profile
+    headers = ["Metric", "1d", "7d", "30d"]
+    rows: list[list[object]] = []
+    for field_name in ("followers", "following", "public_repos"):
+        cells: list[object] = [field_name]
+        for days in (1, 7, 30):
+            delta = _profile_delta(m, field_name, days)
+            if delta is None or delta.delta is None:
+                cells.append("—")
+            else:
+                marker = "" if delta.complete else "*"
+                cells.append(f"{delta.delta:+d}{marker}")
+        rows.append(cells)
+    _print_table(headers, rows)
+
+    activity = report.activity
+    _print_table(
+        ["Activity", "Value"],
+        [
+            ["available",
+             "yes" if activity is not None and activity.available else "no"],
+            ["score", activity.score if activity is not None else None],
+            ["positive delta (cumulative)",
+             activity.total_positive_delta if activity is not None else None],
+            ["active repositories",
+             activity.active_repos if activity is not None else None],
+            ["usable relationships",
+             activity.usable_repos if activity is not None else None],
+            ["observations",
+             activity.observations if activity is not None else None],
+            ["window completeness",
+             activity.complete_share if activity is not None else None],
+            ["confidence",
+             f"{activity.confidence_level} ({activity.confidence_score:.2f})"
+             if activity is not None else None],
+        ],
+    )
+
+    ecosystem = report.ecosystem
+    _print_table(
+        ["Ecosystem", "Value"],
+        [
+            ["score", ecosystem.score if ecosystem is not None else None],
+            ["associated repositories",
+             ecosystem.associated_repositories if ecosystem is not None else None],
+            ["owned repositories",
+             ecosystem.owned_repositories if ecosystem is not None else None],
+            ["missing signals",
+             ", ".join(ecosystem.missing_components) if ecosystem is not None else "—"],
+        ],
+    )
+
+    emerging = report.emerging
+    _print_table(
+        ["Emerging", "Value"],
+        [
+            ["label", emerging.label],
+            ["score", f"{emerging.score:.2f}"],
+            ["confidence", f"{emerging.confidence_level} "
+                           f"({emerging.confidence_score:.2f})"],
+            ["evidence points", emerging.evidence_points],
+            ["signals", _format_raw_signals(emerging.raw_signals)],
+            ["explanation", emerging.explanation],
+        ],
+    )
+
+    links = dataset.links.get(report.developer_id, ())
+    reference_now = dataset.reference_now
+    link_rows: list[list[object]] = []
+    for link in links:
+        repo = dataset.repositories.get(link.repository_id)
+        link_delta = compute_contribution_delta(
+            link.observations,
+            reference_now=reference_now,
+            window_days=window_days,
+        )
+        link_rows.append(
+            [
+                repo.full_name if repo is not None else link.repository_id,
+                link.contributions,
+                f"{link.share:.1%}",
+                (
+                    link_delta.delta
+                    if link_delta is not None and link_delta.delta is not None
+                    else "—"
+                ),
+                len(link.observations),
+            ]
+        )
+    _print_table(
+        ["Repository", "Contributions", "Share", "Observed Δ",
+         "Observations"],
+        link_rows,
+    )
+    if report.topic_relevances:
+        _print_table(
+            ["Topic", "Relevance", "Repos", "Confidence"],
+            [
+                [
+                    relevance.topic,
+                    relevance.score,
+                    relevance.repo_count,
+                    f"{relevance.confidence_level} ({relevance.confidence_score:.2f})",
+                ]
+                for relevance in report.topic_relevances
+            ],
+        )
+
+
+def _format_raw_signals(signals: dict[str, int | float | bool]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in sorted(signals.items()))
+
+
+@app.command("emerging-developers")
+def emerging_developers_command(
+    limit: int = typer.Option(10, "--limit", "-n", help="How many to show."),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    min_confidence: float | None = typer.Option(
+        None, "--min-confidence", help="Minimum emerging confidence (0..1)."
+    ),
+    min_followers: int | None = typer.Option(
+        None, "--min-followers", help="Minimum current followers."
+    ),
+) -> None:
+    """List developers classified EMERGING, most-rising first."""
+    settings = get_settings()
+    _run(
+        _emerging_run(
+            settings,
+            limit=limit,
+            window=_parse_window_days(window),
+            min_confidence=min_confidence,
+            min_followers=min_followers,
+        )
+    )
+
+
+async def _emerging_run(
+    settings: Settings,
+    *,
+    limit: int,
+    window: int,
+    min_confidence: float | None,
+    min_followers: int | None,
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        _dataset, reports = await _build_developer_reports(
+            session, window_days=window
+        )
+        emerging = [
+            report
+            for report in reports
+            if report.emerging.label == "EMERGING"
+            and (
+                min_confidence is None
+                or report.emerging.confidence_score >= min_confidence
+            )
+            and (
+                min_followers is None
+                or (report.followers is not None and report.followers >= min_followers)
+            )
+        ]
+        emerging.sort(key=lambda r: r.emerging.score, reverse=True)
+        if not emerging:
+            print(
+                "No developers classified EMERGING with the current constraints — "
+                "run 'github-radar update' regularly and re-check."
+            )
+            return
+        _print_table(
+            ["Login", "Followers", "Emerging", "Confidence", "Activity", "Repos"],
+            [
+                [
+                    r.login,
+                    r.followers,
+                    f"{r.emerging.score:.2f}",
+                    f"{r.emerging.confidence_level} "
+                    f"({r.emerging.confidence_score:.2f})",
+                    (
+                        r.activity.score
+                        if r.activity is not None and r.activity.available
+                        else None
+                    ),
+                    r.associations,
+                ]
+                for r in emerging[:limit]
             ],
         )
     finally:

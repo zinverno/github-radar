@@ -183,7 +183,8 @@ async def test_repository_upsert_and_relationships(session: AsyncSession) -> Non
         ],
         now=now,
     )
-    assert added == 1
+    assert added.developers_created == 1
+    assert added.snapshots_written == 1
     contrib_rows = await storage.contributors_for_repository(session, row.id)
     assert contrib_rows[0][1] == 42
 
@@ -409,6 +410,9 @@ async def test_mocked_discovery_and_update_preserves_history(
     assert report.discovered == 2
     assert report.snapshots_inserted == 2
     assert report.developer_profiles_fetched == 3
+    assert report.contributors_added == 3
+    assert report.contributor_relationships_observed == 3
+    assert report.developer_snapshots_written == 3
 
     # Second discovery run: same state → updates only, no new snapshots
     async with GitHubClient(settings) as client:
@@ -441,6 +445,20 @@ async def test_mocked_discovery_and_update_preserves_history(
     assert update_report.repositories_refreshed == 2
     assert update_report.snapshots_inserted == 0
     assert update_report.developer_profiles_fetched == 0
+    assert update_report.developer_profiles_reused == 3
+    assert update_report.contributor_relationships_observed == 3
+
+    # Contributor/profile observations accumulate per fetch instant.
+    repo_one = await storage.get_repository_by_github_id(session, 100)
+    alice = await storage.get_developer_by_github_id(session, 200)
+    assert repo_one is not None and alice is not None
+    link_obs = await storage.contributor_snapshots_for_relationship(
+        session, repository_id=repo_one.id, developer_id=alice.id
+    )
+    assert len(link_obs) == 2  # discovery observation + one update observation
+    assert link_obs[-1].contributions == 15
+    dev_snaps = await storage.developer_snapshots_for(session, alice.id)
+    assert len(dev_snaps) == 1  # profile fetched once, then reused while fresh
 
     # GitHub now reports more stars for repo one → next update snapshots it
     detail1["stargazers_count"] = 50
