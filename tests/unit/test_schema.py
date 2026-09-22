@@ -80,11 +80,13 @@ def test_assoc_unique_constraints() -> None:
     assert "uq_repository_contributors" in names(table("repository_contributors"))
 
 
-def test_snapshot_index_and_columns() -> None:
+def test_snapshot_observation_policy_constraint() -> None:
     t = table("repository_snapshots")
-    idx = {i.name: i for i in t.indexes}
-    assert "ix_repository_snapshots_repo_captured" in idx
-    columns = [c.name for c in idx["ix_repository_snapshots_repo_captured"].columns]
+    # A snapshot is uniquely identified by (repository, observation instant) so
+    # re-observing at the same instant is idempotent (upsert).
+    named = {str(c.name): c for c in t.constraints if c.name}
+    constraint = named["uq_repository_snapshots_repo_captured"]
+    columns = [col.name for col in constraint.columns]
     assert columns == ["repository_id", "captured_at"]
     assert t.c.repository_id.foreign_keys  # FK to repositories
 

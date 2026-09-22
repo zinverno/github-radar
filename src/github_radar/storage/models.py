@@ -158,10 +158,10 @@ class ContributorRow(Base):
 class SnapshotRow(Base):
     __tablename__ = "repository_snapshots"
     __table_args__ = (
-        Index(
-            "ix_repository_snapshots_repo_captured",
+        UniqueConstraint(
             "repository_id",
             "captured_at",
+            name="uq_repository_snapshots_repo_captured",
         ),
     )
 

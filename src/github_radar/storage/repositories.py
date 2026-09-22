@@ -393,6 +393,58 @@ async def snapshots_for_repository(
     return result.scalars().all()
 
 
+def _apply_snapshot(row: SnapshotRow, snapshot: RepositorySnapshot) -> None:
+    """Overwrite a snapshot row's observed fields from a domain snapshot."""
+    row.captured_at = snapshot.captured_at
+    row.stars = snapshot.stars
+    row.forks = snapshot.forks
+    row.watchers = snapshot.watchers
+    row.open_issues = snapshot.open_issues
+    row.size_kb = snapshot.size_kb
+    row.pushed_at = snapshot.pushed_at
+
+
+async def record_observation(
+    session: AsyncSession,
+    repository_id: int,
+    snapshot: RepositorySnapshot,
+) -> SnapshotRow:
+    """Persist one observation at ``snapshot.captured_at``, unconditionally.
+
+    This is the *state change* free form of snapshot persistence, for callers
+    that have genuinely polled the repository (a future scheduler, for
+    example). An unchanged repository observed at two different instants is
+    stored as **two** historical rows, so analytics can tell a truly-observed
+    zero-growth period apart from missing history.
+
+    Idempotency is per ``(repository_id, captured_at)``: an observation at an
+    already-captured instant replaces that row (a raw correction of a bad
+    capture), and a *new* instant appends. Historical rows from other instants
+    are never touched. The unique constraint enforces the same-instant
+    guarantee at the database level.
+    """
+    returning = (
+        select(SnapshotRow.id)
+        .where(
+            SnapshotRow.repository_id == repository_id,
+            SnapshotRow.captured_at == snapshot.captured_at,
+        )
+        .limit(1)
+    )
+    row_id = (await session.execute(returning)).scalar_one_or_none()
+    if row_id is None:
+        row = SnapshotRow(repository_id=repository_id, captured_at=snapshot.captured_at)
+        session.add(row)
+        _apply_snapshot(row, snapshot)
+    else:
+        existing = await session.get(SnapshotRow, row_id)
+        assert existing is not None
+        _apply_snapshot(existing, snapshot)
+        row = existing
+    await session.flush()
+    return row
+
+
 async def insert_snapshot_if_changed(
     session: AsyncSession,
     repository_id: int,
@@ -400,27 +452,21 @@ async def insert_snapshot_if_changed(
 ) -> SnapshotRow | None:
     """Insert a snapshot unless the latest one is identical.
 
-    Policy (documented in docs/ARCHITECTURE.md): a snapshot is *only* written
-    when observable state (counters or pushed_at) actually differs from the
-    newest stored one. This keeps the historical table low-noise while still
-    capturing every meaningful change.
+    The Phase 1 *state-change-only* policy: a snapshot is written only when
+    observable state (counters or pushed_at) actually differs from the newest
+    stored one — so a repository that was re-observed but unchanged is *not*
+    recorded here. When state differs, writes delegate to
+    :func:`record_observation` (same-instant re-observation replaces; a new
+    instant appends).
+
+    Periodic pollers that must record *every* observation — including unchanged
+    ones — should call :func:`record_observation` directly instead of this
+    filter.
     """
     latest = await latest_snapshot(session, repository_id)
     if latest is not None and latest.to_domain().same_counters(snapshot):
         return None
-    row = SnapshotRow(
-        repository_id=repository_id,
-        captured_at=snapshot.captured_at,
-        stars=snapshot.stars,
-        forks=snapshot.forks,
-        watchers=snapshot.watchers,
-        open_issues=snapshot.open_issues,
-        size_kb=snapshot.size_kb,
-        pushed_at=snapshot.pushed_at,
-    )
-    session.add(row)
-    await session.flush()
-    return row
+    return await record_observation(session, repository_id, snapshot)
 
 
 # ---------------------------------------------------------------------------

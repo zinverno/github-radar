@@ -1,8 +1,11 @@
-"""Deterministic growth/activity metrics computed from snapshots.
+"""Deterministic growth metrics computed from snapshot series.
 
-All functions operate on :class:`github_radar.domain.RepositorySnapshot`
-values sorted by ``captured_at``. Metrics return ``None`` rather than
-fabricating a value whenever the snapshot history is not old or long enough.
+All computations anchor on ``captured_at`` (the observation time), never on
+wall-clock time, so results are reproducible between runs without a new
+snapshot.  Each window's delta uses the newest snapshot at-or-before the
+window target as its base; when no snapshot is old enough the window uses
+the earliest available snapshot and is reported as *incomplete* rather than
+fabricated.
 """
 
 from __future__ import annotations
@@ -11,100 +14,56 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from github_radar.analytics.timeseries import SnapshotSeries
 from github_radar.domain import RepositorySnapshot
 
-# The time windows (in days) for which we compute deltas by default.
-DELTA_WINDOWS_DAYS = (1, 7, 30)
-
-# Fields for which deltas are computed.
+# The fields whose growth we report.
 DELTA_FIELDS = ("stars", "forks", "watchers", "open_issues")
 
+# The windows (in days) over which growth is reported.
+DELTA_WINDOWS_DAYS = (1, 7, 30)
 
-def sorted_snapshots(
-    snapshots: Sequence[RepositorySnapshot],
-) -> list[RepositorySnapshot]:
-    """Return snapshots ordered by captured_at, newest duplicate wins."""
-    by_time: dict[datetime, RepositorySnapshot] = {}
-    for snap in snapshots:
-        by_time[snap.captured_at] = snap
-    return [by_time[t] for t in sorted(by_time)]
+# A window base is only "complete" when its gap from the target is at most this
+# fraction of the window.
+MAX_GAP_FRACTION = 0.5
+
+_HOURS_PER_DAY = 24.0
 
 
 @dataclass(frozen=True)
 class TimeWindow:
-    """The actual span of snapshots a delta was computed over."""
+    """The actual window a delta spans, and whether it is complete."""
 
     span_days: float
     complete: bool
-    start: datetime
-    end: datetime
+    start: datetime | None
+    end: datetime | None
 
 
 @dataclass(frozen=True)
 class FieldDelta:
-    """Change of a single counter between two snapshots."""
+    """Change of a single field over a window (base → current)."""
 
     field: str
-    delta: int
-    base_value: int
-    current_value: int
-    per_day: float
+    window_days: int
+    base_value: int | None
+    current_value: int | None
+    delta: int | None
+    per_day: float | None
     window: TimeWindow
-
-
-def _delta(
-    snapshots: list[RepositorySnapshot],
-    field: str,
-    days: int,
-) -> FieldDelta | None:
-    if len(snapshots) < 2:
-        return None
-    newest = snapshots[-1]
-    base = snapshots[0]
-    complete = True
-    cutoff = newest.captured_at - timedelta(days=days)
-    for candidate in reversed(snapshots[:-1]):
-        if candidate.captured_at <= cutoff:
-            base = candidate
-            break
-    else:
-        # No observation is old enough for a complete window; fall back to the
-        # earliest snapshot and flag the window as incomplete.
-        base = snapshots[0]
-        complete = False
-    if base is newest:
-        return None
-
-    base_value = getattr(base, field)
-    current_value = getattr(newest, field)
-    if base_value is None or current_value is None:
-        return None
-    span_days = (newest.captured_at - base.captured_at).total_seconds() / 86400.0
-    span_days = max(span_days, 1e-9)
-    delta = current_value - base_value
-    return FieldDelta(
-        field=field,
-        delta=delta,
-        base_value=base_value,
-        current_value=current_value,
-        per_day=delta / span_days,
-        window=TimeWindow(
-            span_days=span_days,
-            complete=complete,
-            start=base.captured_at,
-            end=newest.captured_at,
-        ),
-    )
+    growth_pct: float | None
+    base_gap_hours: float | None
 
 
 @dataclass(frozen=True)
 class RepoMetrics:
-    """All deterministic metrics for one repository derived from snapshots."""
+    """Deterministic metrics for one repository from its snapshot series."""
 
     latest_captured_at: datetime | None
     latest_pushed_at: datetime | None
     latest_counts: dict[str, int | None]
     deltas: dict[tuple[str, int], FieldDelta]
+    series: SnapshotSeries
 
     def get(self, field: str, days: int) -> FieldDelta | None:
         return self.deltas.get((field, days))
@@ -134,25 +93,91 @@ class RepoMetrics:
         return self.get("forks", 30)
 
 
+def sorted_snapshots(
+    snapshots: Sequence[RepositorySnapshot],
+) -> list[RepositorySnapshot]:
+    """Snapshots ordered by ``captured_at``, newest duplicate wins."""
+    return list(SnapshotSeries(snapshots))
+
+
+def _window_delta(
+    series: list[RepositorySnapshot],
+    field: str,
+    days: int,
+) -> FieldDelta | None:
+    """Delta for ``field`` over ``days``, or ``None`` when no base exists."""
+    if len(series) < 2:
+        return None
+    newest = series[-1]
+    target = newest.captured_at - timedelta(days=days)
+
+    base: RepositorySnapshot | None = None
+    for snap in series[:-1]:
+        if snap.captured_at <= target:
+            base = snap
+    complete = True
+    if base is None:
+        base = series[0]
+        complete = False
+    if base is newest:
+        return None
+
+    span_hours = max(
+        (newest.captured_at - base.captured_at).total_seconds() / 3600.0, 1e-9
+    )
+    span_days = span_hours / _HOURS_PER_DAY
+    gap_hours = max(
+        (target - base.captured_at).total_seconds() / 3600.0, 0.0
+    )
+    if complete and gap_hours > days * _HOURS_PER_DAY * MAX_GAP_FRACTION:
+        complete = False
+
+    base_value = getattr(base, field)
+    current_value = getattr(newest, field)
+    if base_value is None or current_value is None:
+        return None
+
+    delta = current_value - base_value
+    growth_pct = (delta / base_value * 100.0) if base_value else None
+    return FieldDelta(
+        field=field,
+        window_days=days,
+        base_value=base_value,
+        current_value=current_value,
+        delta=delta,
+        per_day=delta / span_days,
+        window=TimeWindow(
+            span_days=span_days,
+            complete=complete,
+            start=base.captured_at,
+            end=newest.captured_at,
+        ),
+        growth_pct=growth_pct,
+        base_gap_hours=gap_hours,
+    )
+
+
 def compute_metrics(
-    snapshots_: Sequence[RepositorySnapshot],
+    snapshots: Sequence[RepositorySnapshot],
     *,
     windows: tuple[int, ...] = DELTA_WINDOWS_DAYS,
 ) -> RepoMetrics:
-    """Compute deltas and latest counts from a series of snapshots."""
-    series = sorted_snapshots(snapshots_)
+    series = SnapshotSeries(snapshots)
     if not series:
         return RepoMetrics(
             latest_captured_at=None,
             latest_pushed_at=None,
             latest_counts={},
             deltas={},
+            series=series,
         )
-    newest = series[-1]
+    newest = series.last
+    assert newest is not None
+    items = [s for s in series]
     deltas: dict[tuple[str, int], FieldDelta] = {}
     for field in DELTA_FIELDS:
         for days in windows:
-            delta = _delta(series, field, days)
+            delta = _window_delta(items, field, days)
             if delta is not None:
                 deltas[(field, days)] = delta
     return RepoMetrics(
@@ -163,15 +188,16 @@ def compute_metrics(
             "forks": newest.forks,
             "watchers": newest.watchers,
             "open_issues": newest.open_issues,
-            "size_kb": newest.size_kb,
         },
         deltas=deltas,
+        series=series,
     )
 
 
 __all__ = [
     "DELTA_FIELDS",
     "DELTA_WINDOWS_DAYS",
+    "MAX_GAP_FRACTION",
     "FieldDelta",
     "RepoMetrics",
     "TimeWindow",

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,15 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from github_radar.analytics import FieldDelta, compute_metrics, compute_momentum
+from github_radar.analytics import (
+    WEIGHTS,
+    FieldDelta,
+    RepositoryReport,
+    aggregate_topics,
+    compute_metrics,
+    compute_momentum,
+    rank_repositories,
+)
 from github_radar.config import Settings, SettingsError, get_settings
 from github_radar.discovery import DiscoveryReport, RepositoryDiscoveryService
 from github_radar.github import (
@@ -55,6 +64,8 @@ app = typer.Typer(
 def _fmt(value: object, dash: str = "—") -> str:
     if value is None:
         return dash
+    if isinstance(value, float):
+        return f"{value:.2f}"
     if isinstance(value, datetime):
         return value.isoformat(timespec="seconds")
     if isinstance(value, date):
@@ -397,7 +408,12 @@ async def _repo_run(settings: Settings, *, owner: str, name: str) -> None:
         latest = await storage.latest_snapshot(session, row.id)
         snapshots = await storage.snapshots_for_repository(session, row.id)
         metrics = compute_metrics([s.to_domain() for s in snapshots])
-        momentum = compute_momentum(metrics)
+        reference_now = latest.captured_at if latest is not None else None
+        momentum = (
+            compute_momentum(metrics, reference_now=reference_now)
+            if reference_now is not None
+            else None
+        )
 
         flags = ",".join(
             flag
@@ -466,13 +482,13 @@ async def _repo_run(settings: Settings, *, owner: str, name: str) -> None:
                 ["Component", "Raw value", "Weight", "Contribution"],
                 [
                     ["stars growth %", f"{momentum.stars_growth_pct:.2f}",
-                     momentum.weights["stars_growth"],
+                     WEIGHTS["stars_growth"],
                      f"{momentum.components['stars_growth']:.2f}"],
                     ["forks growth %", f"{momentum.forks_growth_pct:.2f}",
-                     momentum.weights["forks_growth"],
+                     WEIGHTS["forks_growth"],
                      f"{momentum.components['forks_growth']:.2f}"],
                     ["recency (0..1)", f"{momentum.recency:.2f}",
-                     momentum.weights["recency"],
+                     WEIGHTS["recency"],
                      f"{momentum.components['recency']:.2f}"],
                     ["TOTAL", "", "", f"{momentum.score:.2f}"],
                 ],
@@ -525,6 +541,170 @@ async def _stats_run(settings: Settings) -> None:
                 ["snapshots stored", s.snapshots],
                 ["oldest snapshot", _fmt(s.oldest_snapshot_at)],
                 ["newest snapshot", _fmt(s.newest_snapshot_at)],
+            ],
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# trending / topics / topic
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _TrackedRepo:
+    """One tracked repository with its analytics digest and topic names."""
+
+    report: RepositoryReport
+    topics: tuple[str, ...]
+
+
+async def _collect_tracked(session: AsyncSession) -> list[_TrackedRepo]:
+    """Build the per-repository analytics digest used by all three commands.
+
+    ``reference_now`` is always the newest snapshot's ``captured_at`` — a real
+    datetime anchored to observed history, never wall-clock time — so momentum
+    stays deterministic and reproducible between runs.
+    """
+    rows = await storage.list_repos_with_latest(session)
+    tracked: list[_TrackedRepo] = []
+    for repo, latest in rows:
+        names = tuple(
+            t.name for t in await storage.topics_for_repository(session, repo.id)
+        )
+        snapshots = await storage.snapshots_for_repository(session, repo.id)
+        metrics = compute_metrics([s.to_domain() for s in snapshots])
+        reference_now = (
+            latest.captured_at if latest is not None else metrics.latest_captured_at
+        )
+        momentum = (
+            compute_momentum(metrics, reference_now=reference_now)
+            if reference_now is not None
+            else None
+        )
+        tracked.append(
+            _TrackedRepo(
+                report=RepositoryReport(
+                    full_name=repo.full_name,
+                    metrics=metrics,
+                    momentum=momentum,
+                ),
+                topics=names,
+            )
+        )
+    return tracked
+
+
+@app.command()
+def trending(
+    limit: int = typer.Option(
+        10, "--limit", "-n", help="How many to show."
+    ),
+) -> None:
+    """Rank tracked repositories by momentum score (descending)."""
+    settings = get_settings()
+    _run(_trending_run(settings, limit=limit))
+
+
+async def _trending_run(settings: Settings, *, limit: int) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        tracked = await _collect_tracked(session)
+        ranked = rank_repositories([item.report for item in tracked])
+        _print_table(
+            ["Repository", "Stars", "Momentum", "Stars Δ%", "Forks Δ%", "Recency",
+             "Confidence"],
+            [
+                [
+                    r.full_name,
+                    r.stars,
+                    r.score,
+                    r.stars_growth_pct,
+                    r.forks_growth_pct,
+                    r.recency,
+                    r.confidence,
+                ]
+                for r in ranked[:limit]
+            ],
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@app.command("topics")
+def topics_command(
+    limit: int = typer.Option(
+        10, "--limit", "-n", help="How many topics to show."
+    ),
+) -> None:
+    """Aggregate tracked topics by repository coverage and momentum."""
+    settings = get_settings()
+    _run(_topics_run(settings, limit=limit))
+
+
+async def _topics_run(settings: Settings, *, limit: int) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        tracked = await _collect_tracked(session)
+        by_topic: dict[str, list[RepositoryReport]] = {}
+        for item in tracked:
+            for name in item.topics:
+                by_topic.setdefault(name, []).append(item.report)
+        aggregates = aggregate_topics(by_topic)
+        _print_table(
+            ["Topic", "Repos", "Total momentum", "Avg momentum", "Momentum share",
+             "Confidence"],
+            [
+                [
+                    a.name,
+                    a.repository_count,
+                    a.total_momentum,
+                    a.avg_momentum,
+                    a.share_with_momentum,
+                    a.confidence_level,
+                ]
+                for a in aggregates[:limit]
+            ],
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@app.command("topic")
+def topic_command(
+    topic: str = typer.Argument(..., help="Topic name, e.g. mcp."),
+    limit: int = typer.Option(
+        10, "--limit", "-n", help="How many to show."
+    ),
+) -> None:
+    """List repositories for a topic, ranked by momentum."""
+    settings = get_settings()
+    _run(_topic_run(settings, topic=topic, limit=limit))
+
+
+async def _topic_run(settings: Settings, *, topic: str, limit: int) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        topic_name = storage.normalize_topic(topic)
+        tracked = await _collect_tracked(session)
+        matched = [item.report for item in tracked if topic_name in item.topics]
+        ranked = rank_repositories(matched)
+        _print_table(
+            ["Repository", "Stars", "Momentum", "Stars Δ%", "Recency",
+             "Confidence"],
+            [
+                [
+                    r.full_name,
+                    r.stars,
+                    r.score,
+                    r.stars_growth_pct,
+                    r.recency,
+                    r.confidence,
+                ]
+                for r in ranked[:limit]
             ],
         )
     finally:

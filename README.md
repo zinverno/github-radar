@@ -4,6 +4,10 @@ GitHub ecosystem intelligence. **Phase 1** builds the production-minded,
 data-owning foundation: it discovers GitHub repositories by topic/query, tracks
 them over time through append-only snapshots, and stores normalized
 repositories, topics, contributors and developer profiles in PostgreSQL.
+**Phase 2** adds the deterministic analytics that make the historical dataset
+usable: time-series snapshots, an explainable momentum score, repository trend
+classification, topic aggregation and a confidence model — all exposed through
+`trending`, `topics` and `topic` CLI commands (see `docs/TRENDING.md`).
 
 > github-radar is **not** a GitHub Trending scraper. It only ever talks to the
 > official GitHub REST API. The real long-term asset is its own historical
@@ -32,6 +36,25 @@ repositories, topics, contributors and developer profiles in PostgreSQL.
 - No GitHub OAuth / GitHub App / multi-user auth.
 - No outreach, CRM, notifications, or email sending.
 - No crawling of all of GitHub — discovery is query/topic based on purpose.
+
+## What Phase 2 adds
+
+- **Time-series snapshots** — an ordered, de-duplicated per-repository series
+  built from the stored `captured_at` history.
+- **Momentum score** — a deterministic, explainable weighted score
+  (`stars_growth`, `forks_growth`, `recency`) with a documented bound.
+- **Trend classification** — every tracked repository is labelled
+  `rising` / `steady` / `declining` / `inactive` / `new` from its 7-day star
+  growth and recency.
+- **Topic analytics** — repository-level momentum aggregated per topic
+  (count, total/avg momentum, coverage share) and a topic confidence rule.
+- **Confidence model** — deterministic `LOW` / `MEDIUM` / `HIGH` data-coverage
+  scores so thin history is never mistaken for ground truth.
+- **Snapshot observation policy** — same-instant observations are upserted
+  (a changed observation at the newest `captured_at` replaces that row), and a
+  unique `(repository_id, captured_at)` constraint protects the series.
+- All analytics are **reproducible**: they are pure functions of snapshot
+  history plus an explicit reference instant — the wall clock is never read.
 
 ## Requirements
 
@@ -121,7 +144,12 @@ uv run github-radar discover --help
 | `github-radar repos` | list tracked repositories & latest counters |
 | `github-radar repo owner/repository` | full detail for one repository |
 | `github-radar stats` | dataset statistics |
+| `github-radar trending --limit 10` | rank repositories by momentum score |
+| `github-radar topics --limit 10` | aggregate topics by coverage & momentum |
+| `github-radar topic mcp --limit 10` | list repositories for one topic |
 | `github-radar rate-limit` | current GitHub API quota |
+
+See `docs/TRENDING.md` for the exact formulas behind the Phase 2 commands.
 
 ### Example discovery
 
@@ -138,10 +166,25 @@ time.
 
 ## Snapshot policy
 
-A snapshot is written only when the latest observed state actually differs
-from the newest stored snapshot (stars, forks, watchers, open issues, size or
-`pushed_at` changed). Identical observations are skipped — no meaningless
-duplicates. Historical snapshots are never modified or deleted.
+A **state** is a repository's counters at a point in time; an **observation**
+is the fact that we fetched that state at an instant. Analytics can only tell
+"observed and standing still" apart from "not observed" if identical re-polls
+are recorded.
+
+- `insert_snapshot_if_changed` (used by `discover`/`update`) is
+  **state-change-only**: it writes only when counters differ from the newest
+  stored snapshot, so the historical table stays a low-noise change log.
+  Identical observations are skipped — no meaningless duplicates.
+- `record_observation` is the unconditional form for periodic pollers: it
+  persists **every** observation, even unchanged counters, so a repository
+  observed twice with identical state is stored as two rows. (Phase 2 exposes
+  this boundary; no scheduler is built yet.)
+
+Since **Phase 2**, one observation is stored per instant: the table enforces a
+unique `(repository_id, captured_at)` constraint. A re-observation at the same
+`captured_at` replaces that row (idempotent — a raw correction of a bad
+capture); an observation at a new instant appends. History recorded at
+different instants is never mutated.
 
 ## Development
 
@@ -174,6 +217,8 @@ uv run mypy .
 
 - `docs/ARCHITECTURE.md` — modules, data flow, schema, API/rate-limit
   strategy, extension points.
+- `docs/TRENDING.md` — the Phase 2 analytics: momentum, trends, confidence,
+  topic aggregation, and the `trending` / `topics` / `topic` CLI.
 
 ## License
 

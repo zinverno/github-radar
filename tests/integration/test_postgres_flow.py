@@ -24,10 +24,13 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
 import pytest
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -68,6 +71,7 @@ def _guard_test_database() -> None:
     """Validate TEST_DATABASE_URL before any destructive setup runs."""
     _require_safe_test_database()
 
+from github_radar.analytics import compute_metrics  # noqa: E402
 from github_radar.config import Settings  # noqa: E402
 from github_radar.discovery import RepositoryDiscoveryService  # noqa: E402
 from github_radar.domain import (  # noqa: E402
@@ -215,8 +219,10 @@ async def test_snapshot_insertion_and_dedup(session: AsyncSession) -> None:
     dup = RepositorySnapshot.from_repository(repo, captured_at=now)
     assert await storage.insert_snapshot_if_changed(session, row.id, dup) is None
 
+    # A changed observation at a *new* instant appends to history.
+    later = now + timedelta(days=1)
     changed = RepositorySnapshot(
-        captured_at=now,
+        captured_at=later,
         stars=15,
         forks=first.forks,
         watchers=first.watchers,
@@ -225,10 +231,84 @@ async def test_snapshot_insertion_and_dedup(session: AsyncSession) -> None:
         pushed_at=first.pushed_at,
     )
     assert await storage.insert_snapshot_if_changed(session, row.id, changed) is not None
+    snapshots = await storage.snapshots_for_repository(session, row.id)
+    assert [s.stars for s in snapshots] == [10, 15]
 
+    # A changed observation at the *same* instant replaces the row with it,
+    # keeping history idempotent (unique on (repository_id, captured_at)).
+    same_instant = RepositorySnapshot(
+        captured_at=later,
+        stars=20,
+        forks=changed.forks,
+        watchers=changed.watchers,
+        open_issues=changed.open_issues,
+        size_kb=changed.size_kb,
+        pushed_at=changed.pushed_at,
+    )
+    assert await storage.insert_snapshot_if_changed(
+        session, row.id, same_instant
+    ) is not None
     snapshots = await storage.snapshots_for_repository(session, row.id)
     assert len(snapshots) == 2
-    assert [s.stars for s in snapshots] == [10, 15]
+    assert [s.stars for s in snapshots] == [10, 20]
+    await session.commit()
+
+
+async def test_unchanged_observation_is_recorded(session: AsyncSession) -> None:
+    """record_observation persists *every* poll, even unchanged state."""
+    now = utcnow()
+    repo = repo_domain(github_id=13, name="flat", stars=100, forks=3)
+    row, _ = await storage.upsert_repository(session, repo, now=now)
+    first_at = now
+    second_at = now + timedelta(days=7)
+    third_at = second_at + timedelta(days=7)
+
+    # Unchanged counters observed at TWO different instants → two rows.
+    first = await storage.record_observation(
+        session, row.id, RepositorySnapshot.from_repository(repo, first_at)
+    )
+    second = await storage.record_observation(
+        session, row.id, RepositorySnapshot.from_repository(repo, second_at)
+    )
+    assert first is not None and second is not None
+    assert first.id != second.id
+    rows = await storage.snapshots_for_repository(session, row.id)
+    assert len(rows) == 2
+    assert [s.captured_at for s in rows] == [first_at, second_at]
+    assert [s.stars for s in rows] == [100, 100]
+
+    # Same counters + same exact instant → idempotent, no extra row.
+    dup = await storage.record_observation(
+        session, row.id, RepositorySnapshot.from_repository(repo, second_at)
+    )
+    assert dup.id == second.id
+    rows = await storage.snapshots_for_repository(session, row.id)
+    assert len(rows) == 2
+
+    # A later observation never overwrites earlier history.
+    third = await storage.record_observation(
+        session, row.id, RepositorySnapshot.from_repository(repo, third_at)
+    )
+    assert third.id not in (first.id, second.id)
+    rows = await storage.snapshots_for_repository(session, row.id)
+    assert len(rows) == 3
+    assert [s.captured_at for s in rows] == [first_at, second_at, third_at]
+
+    # The Phase 1 filter API still refuses an unchanged re-observation.
+    assert (
+        await storage.insert_snapshot_if_changed(
+            session, row.id, RepositorySnapshot.from_repository(repo, third_at)
+        )
+        is None
+    )
+
+    # Analytics see a true, observed zero-growth 7-day window end to end.
+    metrics = compute_metrics([s.to_domain() for s in rows])
+    seven = metrics.stars_7d
+    assert seven is not None
+    assert seven.delta == 0
+    assert seven.growth_pct == 0.0
+    assert seven.window.complete is True
     await session.commit()
 
 
@@ -412,6 +492,23 @@ def _run_alembic(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _alembic_head_revision() -> str:
+    """The repository's *current* Alembic head, read from the scripts.
+
+    Derived from Alembic metadata (``ScriptDirectory.get_heads``) via the same
+    configuration the CLI uses (``alembic.ini`` + an absolute
+    ``script_location``), so the expectation tracks future migrations instead of
+    hard-coding a revision id.
+    """
+    config = AlembicConfig(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option(
+        "script_location", str(PROJECT_ROOT / "migrations")
+    )
+    heads = ScriptDirectory.from_config(config).get_heads()
+    assert len(heads) == 1, f"expected a single-head history, got {heads}"
+    return heads[0]
+
+
 def test_alembic_migrations_apply_to_postgres() -> None:
     """Migrations must apply to the real PostgreSQL via DATABASE_URL.
 
@@ -419,6 +516,10 @@ def test_alembic_migrations_apply_to_postgres() -> None:
     ``driver://`` placeholder to SQLAlchemy instead of the configured
     ``DATABASE_URL`` (``NoSuchModuleError: Can't load plugin:
     sqlalchemy.dialects:driver``).
+
+    The expected revision is *not* hard-coded: the test derives the head from
+    ``ScriptDirectory`` and only asserts that the migrated database reports
+    that same revision with the ``(head)`` marker.
     """
     _drop_test_schema()
 
@@ -429,9 +530,12 @@ def test_alembic_migrations_apply_to_postgres() -> None:
     upgrade = _run_alembic("upgrade", "head")
     assert upgrade.returncode == 0, upgrade.stderr
 
+    expected_head = _alembic_head_revision()
     upgraded = _run_alembic("current")
-    assert "0001" in upgraded.stdout + upgraded.stderr
+    assert upgraded.returncode == 0, upgraded.stderr
     assert "Can't load plugin" not in upgraded.stdout + upgraded.stderr
+    assert expected_head in upgraded.stdout + upgraded.stderr
+    assert "(head)" in upgraded.stdout + upgraded.stderr
 
     assert _run_alembic("downgrade", "base").returncode == 0
     _drop_test_schema()

@@ -1,116 +1,150 @@
-"""An intentionally simple, experimental momentum score.
+"""Deterministic, explainable repository momentum.
 
-The score is explicitly *not* scientific: it is a transparent, documented
-weighted blend of three explainable components computed from the 7-day
-snapshot window:
+Momentum is a weighted sum of three explainable, deterministic components
+derived from snapshot history (see :mod:`github_radar.analytics.metrics`):
 
-    momentum = w_stars * stars_growth_pct
-             + w_forks * forks_growth_pct
-             + w_recency * recency
+* ``stars_growth`` — relative star growth over ``WINDOW_DAYS`` as a
+  percentage-point value, capped at ``MAX_GROWTH_PCT``.
+* ``forks_growth`` — relative fork growth over the same window, capped the
+  same way.
+* ``recency`` — a freshness factor in ``[0, 1]`` that decays linearly from
+  ``1.0`` (pushed at the reference instant) to ``0.0`` over
+  ``RECENCY_HALF_LIFE_DAYS``.
 
-Component definitions
----------------------
-* ``stars_growth_pct`` — relative star growth over the 7-day window:
-      (stars_delta_7d / stars_base_7d) * 100
-  where ``stars_base_7d`` is the star count at the window start. It rewards
-  fast relative growth, not absolute size.
-* ``forks_growth_pct`` — the same formula applied to forks.
-* ``recency`` — how recently the repository was pushed to:
-      1 - min(days_since_last_push / 90, 1)
-  clamped to [0, 1]. Rewards active projects; 0 for repos untouched for 90+
-  days.
+Each component contributes ``WEIGHTS[key] * value`` points, so the value is
+simply "how many points this explainable factor contributes".  Because every
+growth value is capped at ``MAX_GROWTH_PCT`` and recency is bounded to
+``[0, 1]``, each component — and therefore the whole score — has a hard,
+documented maximum: ``MAX_SCORE``.
 
-All raw metrics (deltas, base values, per-day rates) remain accessible from
-the returned :class:`MomentumScore` so the score is fully explainable.
-
-If the 7-day star window is unavailable the score is ``None`` — we never
-fabricate a value from insufficient history.
-
-Replaceability: swap this function (or its weights) freely; nothing else in
-the codebase depends on its internals.
+Everything is anchored on snapshot ``captured_at``/``pushed_at`` timestamps and
+the caller-supplied ``reference_now``; the wall clock is never consulted, so
+the result is reproducible between runs.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
 from github_radar.analytics.metrics import RepoMetrics
+from github_radar.analytics.recency import recency_score
 
-# How many days of inactivity places recency at 0.
+# Relative growth is capped at this many percentage points so the component
+# contribution stays bounded.
+MAX_GROWTH_PCT = 100.0
+
+# Recency decays to zero over this many days since the last push.
 RECENCY_HALF_LIFE_DAYS = 90.0
 
-# Public weights so the score stays explainable and tunable.
-WEIGHTS = {"stars_growth": 1.0, "forks_growth": 0.5, "recency": 2.0}
+# Component weights ("points per unit of value").  A growth unit is one
+# percentage point; a recency unit is one unit of freshness in ``[0, 1]``.
+WEIGHTS = {
+    "stars_growth": 0.05,
+    "forks_growth": 0.03,
+    "recency": 1.0,
+}
 
+MAX_SCORE = (
+    WEIGHTS["stars_growth"] * MAX_GROWTH_PCT
+    + WEIGHTS["forks_growth"] * MAX_GROWTH_PCT
+    + WEIGHTS["recency"] * 1.0
+)
+
+# Growth window (days) used to score momentum.
 WINDOW_DAYS = 7
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _growth_value(delta: int | None, base: int | None) -> float:
+    """Relative growth as a capped percentage-point value.
+
+    Returns ``0.0`` when the base is missing or zero (no meaningful growth) and
+    caps the relative growth at ``MAX_GROWTH_PCT`` percentage points.
+    """
+    if delta is None or base is None or base <= 0:
+        return 0.0
+    value = delta / base * 100.0
+    return _clamp(value, 0.0, MAX_GROWTH_PCT)
+
+
+def _recency_value(metrics: RepoMetrics, reference_now: datetime) -> float:
+    """Freshness in ``[0, 1]`` from the last push vs. ``reference_now``.
+
+    Delegates to :func:`github_radar.analytics.recency.recency_score` so the
+    decay definition is shared with trend classification.
+    """
+    return recency_score(
+        metrics.latest_pushed_at,
+        reference_now=reference_now,
+        half_life_days=RECENCY_HALF_LIFE_DAYS,
+    )
 
 
 @dataclass(frozen=True)
 class MomentumScore:
-    """The experimental momentum score and its raw components."""
+    """The explainable momentum score for one repository."""
 
     score: float
     stars_growth_pct: float
     forks_growth_pct: float
     recency: float
-    window_days: int
-    window_complete: bool
-    # Weighted components, for explainability.
     components: dict[str, float]
-    weights: dict[str, float]
 
+    @property
+    def max_score(self) -> float:
+        return MAX_SCORE
 
-def _days_between(later: datetime, earlier: datetime) -> float:
-    return (later - earlier).total_seconds() / 86400.0
+    @property
+    def within_bounds(self) -> bool:
+        return 0.0 <= self.score <= MAX_SCORE
 
 
 def compute_momentum(
     metrics: RepoMetrics,
     *,
-    reference_now: datetime | None = None,
+    reference_now: datetime,
 ) -> MomentumScore | None:
-    """Compute the momentum score, or ``None`` when history is insufficient."""
+    """Score repo momentum, or ``None`` when the growth window is unusable.
+
+    Growth is anchored on the exact windowed deltas in ``metrics``; a score
+    requires a usable base for both stars and forks over ``WINDOW_DAYS``.
+    When a component cannot be determined (missing delta, zero base), momentum
+    is not fabricated - ``None`` is returned instead.
+    """
     stars = metrics.get("stars", WINDOW_DAYS)
-    if stars is None or stars.base_value <= 0:
+    forks = metrics.get("forks", WINDOW_DAYS)
+    if stars is None or forks is None:
+        return None
+    if stars.delta is None or stars.base_value is None or stars.base_value <= 0:
+        return None
+    if forks.delta is None or forks.base_value is None or forks.base_value <= 0:
         return None
 
-    stars_growth_pct = stars.delta / stars.base_value * 100.0
-
-    forks = metrics.get("forks", WINDOW_DAYS)
-    if forks is not None and forks.base_value > 0:
-        forks_growth_pct = forks.delta / forks.base_value * 100.0
-    else:
-        # No comparable fork baseline; treat forks as neutral rather than
-        # excluding the component silently.
-        forks_growth_pct = 0.0
-
-    now = reference_now or datetime.now(UTC)
-    if metrics.latest_pushed_at is not None:
-        days_since_push = max(0.0, _days_between(now, metrics.latest_pushed_at))
-        recency = max(0.0, 1.0 - days_since_push / RECENCY_HALF_LIFE_DAYS)
-    else:
-        recency = 0.0
+    stars_growth_pct = _growth_value(stars.delta, stars.base_value)
+    forks_growth_pct = _growth_value(forks.delta, forks.base_value)
+    recency = _recency_value(metrics, reference_now)
 
     components = {
         "stars_growth": WEIGHTS["stars_growth"] * stars_growth_pct,
         "forks_growth": WEIGHTS["forks_growth"] * forks_growth_pct,
         "recency": WEIGHTS["recency"] * recency,
     }
-    score = sum(components.values())
     return MomentumScore(
-        score=score,
+        score=sum(components.values()),
         stars_growth_pct=stars_growth_pct,
         forks_growth_pct=forks_growth_pct,
         recency=recency,
-        window_days=WINDOW_DAYS,
-        window_complete=stars.window.complete and (forks is not None and forks.window.complete),
         components=components,
-        weights=dict(WEIGHTS),
     )
 
 
 __all__ = [
+    "MAX_GROWTH_PCT",
+    "MAX_SCORE",
     "RECENCY_HALF_LIFE_DAYS",
     "WEIGHTS",
     "WINDOW_DAYS",

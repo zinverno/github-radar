@@ -1,8 +1,10 @@
 # Architecture
 
-Phase 1 architecture notes for github-radar. Everything here describes how the
-current code is put together, the contracts between layers, and the deliberate
-design decisions (and their trade-offs).
+Architecture notes for github-radar. Everything here describes how the current
+code is put together, the contracts between layers, and the deliberate design
+decisions (and their trade-offs). Phase 1 = data foundation + CLI; Phase 2 =
+deterministic analytics (time-series, momentum, trends, topics, confidence)
+built purely on the snapshot history.
 
 ## Overview
 
@@ -12,10 +14,10 @@ design decisions (and their trade-offs).
 │  (httpx)                raw JSON    canonical      SQLAlchemy 2.x    (asyncpg)
 │                          models      dataclasses    async ORM
 └────────────────────────────────────────────────────────────────────┘
-   ▲                  │  ▲
-   │ client           │  analytics/
-   │ (auth, retries,  │  (metrics, momentum)
-   │  rate limits)    │
+   ▲                  │            ▲
+   │ client           │            │ analytics/ (metrics, momentum, trends,
+   │ (auth, retries,  │            │  topics, confidence, timeseries, recency)
+   │  rate limits)    │            │  — pure functions of RepositorySnapshot
    services/  ──►  discovery/service.py   (search → persist → snapshot)
             └──►  services/update.py      (refresh tracked repos)
             └──►  services/developers.py  (throttled profile sync)
@@ -40,8 +42,13 @@ the other's types.
 | `storage/db.py` | Engine/session factory (`asyncpg`), `ping` |
 | `storage/models.py` | SQLAlchemy ORM (the schema — see below) |
 | `storage/repositories.py` | All persistence operations + queries + stats |
-| `analytics/metrics.py` | Deterministic per-window deltas/rates |
+| `analytics/metrics.py` | Deterministic per-window deltas/rates + `RepoMetrics` |
+| `analytics/timeseries.py` | `SnapshotSeries`: ordered, deduped snapshot lookups |
+| `analytics/recency.py` | Deterministic age/staleness relative to a reference instant |
 | `analytics/momentum.py` | Experimental, explainable momentum score |
+| `analytics/trends.py` | Trend classification + `rank_repositories` (trending core) |
+| `analytics/topics.py` | `aggregate_topics` (topic-level momentum aggregation) |
+| `analytics/confidence.py` | Deterministic data-coverage `LOW`/`MEDIUM`/`HIGH` model |
 | `discovery/service.py` | Discovery orchestration |
 | `services/update.py` | Update orchestration |
 | `services/developers.py` | Throttled profile sync |
@@ -96,15 +103,20 @@ never touched).
 `first_seen_at`, `last_seen_at`. Index on `(repository_id, contributions)` for
 leaderboard queries.
 
-### `repository_snapshots`  (append-only)
+### `repository_snapshots`  (observation log)
 `id` (PK), `repository_id` (FK, CASCADE), `captured_at`, `stars`, `forks`,
-`watchers`, `open_issues`, `size_kb`, `pushed_at`. Index on
-`(repository_id, captured_at)`. Rows are never updated or deleted.
+`watchers`, `open_issues`, `size_kb`, `pushed_at`. Unique constraint
+`uq_repository_snapshots_repo_captured` on `(repository_id, captured_at)`.
+**One observation per instant per repository.** Rows from different instants
+are never updated or deleted.
 
-A cosmetic duplicate-guard unique index on `(repository_id, captured_at)` is not
-created because `insert_snapshot_if_changed` already prevents identical
-observations (see snapshot policy) — surges within the same second are still
-kept because `captured_at` differs.
+`record_observation` writes every poll; `insert_snapshot_if_changed` writes
+only when counters changed (both delegate to the same per-instant upsert). The
+unique constraint additionally forbids two rows for the same repository and
+instant: a re-observation at an already-captured instant **replaces** that row
+(idempotent / raw correction) and a new instant **appends**. Surges within the
+same second that happen to be captured at the same instant collapse into one
+row — accepted and documented trade-off.
 
 ## Data flow
 
@@ -139,11 +151,30 @@ profiles. Developer profiles are re-fetched at most once per
 
 ### Snapshot policy
 
-`insert_snapshot_if_changed` compares the new observation with the **newest
-stored** snapshot using `RepositorySnapshot.same_counters()` (stars, forks,
-watchers, open issues, size_kb, pushed_at). Identical → skipped. Different →
-appended. History is never rewritten. This keeps the historical table
-low-noise (state-change log, not a sampling log).
+A **state** is the repository's counters at a point in time. An
+**observation** is a fact that we fetched that state at a specific instant.
+The distinction matters for analytics: _two observations with identical state_
+prove the repository was seen and standing still, while _one observation_ only
+proves it existed once.
+
+`insert_snapshot_if_changed` is the Phase 1 **state-change-only** filter: it
+compares the new observation with the *newest stored* snapshot using
+`RepositorySnapshot.same_counters()` (stars, forks, watchers, open issues,
+size_kb, pushed_at). Identical → skipped (`None`). Different → written via
+`record_observation`.
+
+`record_observation` is the truer, unconditional form: it persists **every**
+observation and never compares counters. A repository genuinely polled twice
+with identical counters is stored as **two** rows — so clearly-observed zero
+growth is representable. Idempotency is per instant
+(`uq_repository_snapshots_repo_captured`): a re-observation at the exact same
+`captured_at` replaces that row (a raw correction), a new instant appends, and
+history from other instants is never rewritten.
+
+There is **no production scheduler yet**: services and the CLI still use the
+state-change-only filter, so the stored history remains a low-noise change log.
+Phase 2 only makes *periodic* observation possible — a future scheduler calls
+`record_observation` on each poll tick to fill in unchanged periods.
 
 ## GitHub API surface
 
@@ -175,6 +206,11 @@ Only the official REST API is used (no GraphQL yet).
 
 ## Analytics
 
+All analytics are **pure functions of `RepositorySnapshot` history** plus an
+explicit reference instant — the wall clock is never consulted, so results are
+reproducible between runs without a new snapshot. The CLI computes the
+reference instant from the newest stored `captured_at`.
+
 ### Metrics (`analytics/metrics.py`)
 
 For each of `stars`, `forks`, `watchers`, `open_issues` and each of the windows
@@ -183,6 +219,22 @@ For each of `stars`, `forks`, `watchers`, `open_issues` and each of the windows
 the newest snapshot older than `now - window` when one exists, otherwise the
 earliest snapshot (window flagged incomplete). All inputs are
 `RepositorySnapshot` values; results are `None` when history is too short.
+`RepoMetrics` bundles every window's deltas, the latest counts and a
+`SnapshotSeries` of the repository's snapshots.
+
+### Time series (`analytics/timeseries.py`)
+
+`SnapshotSeries` wraps the ordered, de-duplicated snapshot list and answers
+`at_or_before` / `at_or_after` / `previous_of` / `nearest_to` lookups. It is the
+shared lookup tool for the analytic modules and always picks the
+deterministic-equal answer (e.g. the older snapshot on an exact tie).
+
+### Recency (`analytics/recency.py`)
+
+`recency_score(pushed_at, reference_now, half_life_days)` decays linearly from
+`1.0` (pushed at the reference instant) to `0.0` over the half-life, clamped.
+Used by both momentum and trend classification so the "freshness" definition is
+shared.
 
 ### Momentum (`analytics/momentum.py`)
 
@@ -190,16 +242,44 @@ One experimental, **explainable** score (weights are module constants, every
 component is exposed on the result):
 
 ```
-growth_pct = 100 * current / base − 100        (7-day star delta over base)
-recency    = clamp(1 − days_since_last_push / 90, 0, 1)
-score      = 1.0 · stars_growth_pct
-           + 0.5 · forks_growth_pct
-           + 2.0 · recency
+stars_growth = clamp(100 · Δstars / base, 0, 100)     (Δ = 7-day window delta)
+forks_growth = clamp(100 · Δforks / base, 0, 100)     (same window)
+recency      = recency_score(last push, reference_now, 90d)  ∈ [0, 1]
+score        = 0.05 · stars_growth
+             + 0.03 · forks_growth
+             + 1.00 · recency
 ```
 
-Returns `None` when the base snapshot is missing or zero (uncomputable) rather
-than fabricating a number. Replace `WEIGHTS` / `WINDOW_DAYS` /
-`RECENCY_HALF_LIFE_DAYS` — or the whole function — without touching callers.
+The score is bounded: `MAX_SCORE = 0.05·100 + 0.03·100 + 1.0·1 = 9.0`.
+Returns `None` when either growth delta is unavailable or its base is zero
+(uncomputable) rather than fabricating a number. Replace `WEIGHTS` /
+`WINDOW_DAYS` / `RECENCY_HALF_LIFE_DAYS` — or the whole function — without
+touching callers.
+
+### Trends (`analytics/trends.py`)
+
+`classify_trend(metrics, momentum, *, reference_now)` labels a repository
+`rising` / `steady` / `declining` / `inactive` / `new` from its 7-day star
+growth (thresholds ±5 pp) and recency (< 0.05 ⇒ `inactive`). `rank_repositories`
+filters out repositories without a computable momentum, sorts the rest by score
+descending and attaches each row's 7-day window confidence — the pure core
+behind `trending`.
+
+### Topics (`analytics/topics.py`)
+
+`aggregate_topics(reports_by_topic)` turns `{topic: [RepositoryReport, …]}` into
+`TopicAggregate` rows (repository count, total/avg momentum,
+share-with-momentum, plus the topic confidence rule), sorted by total momentum
+descending.
+
+### Confidence (`analytics/confidence.py`)
+
+A deterministic data-coverage score in `[0, 1]` mapped to `LOW` / `MEDIUM` /
+`HIGH`. Repository windows blend three terms — snapshot count, window span and
+base-gap — weighted `0.34 / 0.33 / 0.33`. Topic confidence blends topic size,
+share-with-momentum and share-of-complete-windows (`0.50 / 0.30 / 0.20`) and
+cannot reach `HIGH` below `TOPIC_MIN_REPOS_FOR_HIGH` (10). Confidence is *not*
+a p-value; it exists so thin history is loudly labelled.
 
 ## Config knobs
 
@@ -222,16 +302,23 @@ See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
   observable changed between two runs, no snapshot is written.
 - **Search is capped by GitHub** (100 items/page, ~1000 results) — discovery is
   query/topic scoped, not a full GitHub crawl.
-- No time-series sampling job exists yet (Phase 2 territory).
+- **Analytics are snapshot-anchored.** No wall-clock scheduler produces time
+  series yet: current services/CLI use the state-change-only
+  `insert_snapshot_if_changed`, so history fills in only when state changed.
+  Periodic observation is *possible* (the storage boundary exposes
+  `record_observation`), but a scheduler that polls on a schedule is a future
+  pipeline (Phase 3+), not yet built.
 
-## Extension points for Phase 2
+## Extension points
 
 - A scheduler/crawler job can call the same `RepositoryDiscoveryService` /
   `RepositoryUpdateService` and rely on the snapshot policy for history.
-- Derived snapshots (e.g. "N days ago, per repo") can be reconstructed
-  *without* writing new data because `captured_at` history is retained.
-- Topic-based growth analytics need only join `repository_topics` →
-  `repository_snapshots`.
+- Derived snapshots (e.g. "N days ago, per repo") can be reconstructed with
+  `SnapshotSeries` *without* writing new data because `captured_at` history is
+  retained.
+- Topic-based growth analytics already join `repository_topics` →
+  `repository_snapshots` via `_collect_tracked` in the CLI; a richer topic
+  model can reuse `aggregate_topics` / `TopicConfidenceRule`.
 - The momentum function is designed to be replaced by richer models
   (e.g. time-series or LLM-assisted summaries) — analytics stay purely
   functions of snapshots, so downstream models don't touch storage.

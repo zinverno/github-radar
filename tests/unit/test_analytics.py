@@ -6,7 +6,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from github_radar.analytics import compute_metrics, sorted_snapshots
+from github_radar.analytics import (
+    compute_metrics,
+    compute_momentum,
+    sorted_snapshots,
+)
 from github_radar.domain import RepositorySnapshot
 
 T0 = datetime(2024, 1, 1, tzinfo=UTC)
@@ -106,3 +110,32 @@ def test_30d_absent_when_history_too_short() -> None:
     metrics = compute_metrics(series)
     assert metrics.stars_30d is not None  # incomplete window, still reportable
     assert metrics.stars_30d.window.complete is False
+
+
+def test_unchanged_observation_at_both_ends_is_true_zero_growth() -> None:
+    """A genuinely observed, unchanged repo yields a *valid* zero delta."""
+    series = [
+        snap(days_from_origin=0, stars=100, forks=10),
+        snap(days_from_origin=7, stars=100, forks=10),
+    ]
+    metrics = compute_metrics(series)
+    seven = metrics.stars_7d
+    assert seven is not None
+    assert seven.delta == 0
+    assert seven.growth_pct == 0.0
+    assert seven.per_day == 0.0
+    assert seven.window.complete is True
+    assert seven.window.span_days == pytest.approx(7.0, abs=1e-6)
+
+    momentum = compute_momentum(metrics, reference_now=T0 + timedelta(days=7))
+    assert momentum is not None
+    assert momentum.stars_growth_pct == 0.0
+
+
+def test_missing_observation_is_unavailable_not_zero() -> None:
+    """One observation only: the window is *missing*, never a fabricated zero."""
+    metrics = compute_metrics([snap(days_from_origin=0, stars=100, forks=10)])
+    assert metrics.stars_7d is None
+    assert metrics.stars_30d is None
+    momentum = compute_momentum(metrics, reference_now=T0)
+    assert momentum is None
