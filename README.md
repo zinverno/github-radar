@@ -12,7 +12,14 @@ classification, topic aggregation and a confidence model — all exposed through
 into an intelligence surface: per-developer profile and contribution history,
 topic relevance, observed activity, ecosystem score and an emerging-developer
 classification, exposed through `developers`, `developer` and
-`emerging-developers` (see `docs/DEVELOPERS.md`).
+`emerging-developers` (see `docs/DEVELOPERS.md`). **Phase 4** turns the whole
+tracked dataset into an **ecosystem graph**: a derived, in-memory network of
+developers, repositories and topics connected by real contribution, ownership
+and topic edges. It adds overlap and reach metrics, degree/weighted-degree
+centrality, connected components, bridge intelligence (developers and
+repositories connecting separate topic ecosystems) and graph reports — exposed
+through `ecosystem`, `bridges`, `related-topics` and `related-repos` and the
+graph sections of `developer` and `topic` (see `docs/GRAPH.md`).
 
 > github-radar is **not** a GitHub Trending scraper. It only ever talks to the
 > official GitHub REST API. The real long-term asset is its own historical
@@ -87,6 +94,33 @@ classification, exposed through `developers`, `developer` and
 - All of it is exposed through `developers`, `developer LOGIN` and
   `emerging-developers`, and each `topic` result now lists the developers
   relevant to it.
+
+## What Phase 4 adds
+
+- **Ecosystem graph** — a derived in-memory graph with `DEVELOPER`,
+  `REPOSITORY` and `TOPIC` nodes and three evidence edge types: `OWNS`,
+  `CONTRIBUTES_TO` (with cumulative counts, per-repo share and observation
+  history) and `TAGGED_WITH`. It is re-derived fresh from PostgreSQL on every
+  command — there is no separate graph store to stay in sync with.
+- **Overlap & relationships** — jaccard overlap between pairs of repositories
+  (developers, topics) and between topic ecosystems, with separate overlap
+  components and data-coverage confidence.
+- **Reach & centrality** — for every node, how many repositories, developers
+  and topics it touches directly, plus deterministic degree/weighted-degree
+  centrality per node type.
+- **Connected components** — the graph partitioned into deterministic
+  components under its direct edges, sized and ordered for reporting.
+- **Bridge intelligence** — developers (and repositories) whose evidence
+  genuinely spans separate topic ecosystems, scored with explainable bounded
+  components, small-sample caps and confidence. Bridges require real evidence
+  in *both* ecosystems; many arbitrary tags on one repository never produce a
+  bridge.
+- **Graph reports** — `ecosystem`, `bridges develop|cross-topic|repos`,
+  `related-topics TOPIC`, `related-repos OWNER/REPO`, plus graph sections in
+  each `developer LOGIN` and `topic TOPIC` output.
+- All graph analytics are **pure functions of the stored dataset**: results
+  are reproducible between runs and never consult the wall clock (the
+  reference instant is the newest real observation).
 
 ## Requirements
 
@@ -182,10 +216,17 @@ uv run github-radar discover --help
 | `github-radar developers --sort activity` | list tracked developers with intelligence scores |
 | `github-radar developer adalovelace` | full profile, activity and emerging digest for one developer |
 | `github-radar emerging-developers` | developers classified EMERGING, most-rising first |
+| `github-radar ecosystem` | whole tracked ecosystem graph: node/edge counts, components, hubs, top bridges |
+| `github-radar bridges develop --topic mcp` | developers bridging topic ecosystems |
+| `github-radar bridges cross-topic mcp browser-agents` | the bridge ecosystem between two topics |
+| `github-radar bridges repos` | repositories ranked as cross-ecosystem bridges |
+| `github-radar related-topics mcp` | a topic's graph footprint and related topics |
+| `github-radar related-repos owner/repository` | a repository's graph footprint and related repositories |
 | `github-radar rate-limit` | current GitHub API quota |
 
-See `docs/TRENDING.md` for the exact formulas behind the Phase 2 commands and
+See `docs/TRENDING.md` for the exact formulas behind the Phase 2 commands,
 `docs/DEVELOPERS.md` for the developer-intelligence formulas behind the Phase 3
+commands, and `docs/GRAPH.md` for the Phase 4 graph model, metrics, bridges and
 commands.
 
 ### Example discovery
@@ -259,6 +300,9 @@ uv run mypy .
 - `docs/DEVELOPERS.md` — the Phase 3 developer intelligence: observation
   policy, topic relevance, activity, ecosystem score, emerging classification,
   contacts, and the `developers` / `developer` / `emerging-developers` CLI.
+- `docs/GRAPH.md` — the Phase 4 ecosystem graph: model, overlap/reach/centrality
+  metrics, connected components, bridges, reports, and the `ecosystem` /
+  `bridges` / `related-topics` / `related-repos` CLI.
 
 ## License
 

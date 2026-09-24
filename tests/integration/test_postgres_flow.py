@@ -26,6 +26,7 @@ import sys
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -81,6 +82,7 @@ from github_radar.domain import (  # noqa: E402
     RepositorySnapshot,
 )
 from github_radar.github.client import GitHubClient  # noqa: E402
+from github_radar.graph.loader import load_graph  # noqa: E402
 from github_radar.services import RepositoryUpdateService  # noqa: E402
 from github_radar.storage import repositories as storage  # noqa: E402
 from github_radar.storage.db import make_engine, make_session_factory  # noqa: E402
@@ -339,6 +341,111 @@ async def test_compute_stats(session: AsyncSession) -> None:
     assert stats.snapshots == 2
     assert stats.oldest_snapshot_at is not None
     assert stats.newest_snapshot_at is not None
+
+
+class _QueryCounter:
+    """Proxies an :class:`AsyncSession`, counting ``execute`` statements."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self.statements = 0
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        self.statements += 1
+        return await self._session.execute(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+
+async def _seed_graph_dataset(
+    session: AsyncSession,
+    *,
+    base_github_id: int,
+    repo_count: int,
+    dev_github_id_base: int,
+) -> None:
+    """Seed ``repo_count`` tracked repositories with topics, snapshots, links.
+
+    All repositories share one owner developer (``octo``, github_id=42), which
+    is what produces the ``OWNS`` edges. Contributor developers are distinct
+    per dataset via ``dev_github_id_base``.
+    """
+    now = utcnow()
+    await storage.sync_profile(
+        session, Developer(github_id=42, login="octo", name="Octo Cat"), now=now
+    )
+    for offset in range(repo_count):
+        repo = repo_domain(
+            github_id=base_github_id + offset,
+            name=f"svc-{base_github_id}-{offset}",
+            stars=100,
+            topics=("mcp", "ai"),
+        )
+        row, _ = await storage.upsert_repository(session, repo, now=now)
+        await storage.set_repository_topics(session, row, ["MCP", "ai"], now=now)
+        await storage.insert_snapshot_if_changed(
+            session, row.id, RepositorySnapshot.from_repository(repo, now)
+        )
+        contributors = [
+            Contributor(
+                developer=Developer(
+                    github_id=dev_github_id_base + offset * 4 + dev_offset,
+                    login=f"dev-{offset}-{dev_offset}",
+                ),
+                contributions=10 + dev_offset,
+            )
+            for dev_offset in range(4)
+        ]
+        await storage.sync_contributors(session, row, contributors, now=now)
+    await session.commit()
+
+
+async def test_graph_loader_uses_bounded_queries(session: AsyncSession) -> None:
+    """``load_graph`` must not issue per-repository or per-link queries.
+
+    The tracked dataset is grown in two steps: 8 repositories are seeded, the
+    loader's statement count is measured, then 16 more are seeded and it is
+    measured again. The loader's statement count must not scale with the size
+    of the dataset — the whole point of the no-N+1 loader. The loaded graph is
+    also spot-checked against the seeded rows.
+    """
+    await _seed_graph_dataset(
+        session, base_github_id=1000, repo_count=8, dev_github_id_base=10000
+    )
+    small = _QueryCounter(session)
+    small_graph = await load_graph(cast(AsyncSession, small))
+    await _seed_graph_dataset(
+        session, base_github_id=2000, repo_count=16, dev_github_id_base=20000
+    )
+
+    large = _QueryCounter(session)
+    large_graph = await load_graph(cast(AsyncSession, large))
+
+    # Statements never scale with repositories or contributor links.
+    assert large.statements <= 10
+    assert large.statements - small.statements <= 3
+
+    # The large graph is the whole tracked dataset: 8 + 16 repositories.
+    # Every seeded repository contributes four contributor developers, plus one
+    # shared owner developer (octo, github_id=42) that owns every repository.
+    assert len(small_graph.repository_ids) == 8
+    assert len(small_graph.developer_ids) == 8 * 4 + 1  # shared owner
+    assert len(large_graph.repository_ids) == 8 + 16
+    assert len(large_graph.developer_ids) == (8 + 16) * 4 + 1  # shared owner
+    assert len(large_graph.topic_ids) == 2
+    contributes = [
+        edge for edge in large_graph.edges() if edge.edge_type == "CONTRIBUTES_TO"
+    ]
+    tagged = [edge for edge in large_graph.edges() if edge.edge_type == "TAGGED_WITH"]
+    owns = [edge for edge in large_graph.edges() if edge.edge_type == "OWNS"]
+    assert len(contributes) == (8 + 16) * 4
+    assert len(tagged) == (8 + 16) * 2
+    assert len(owns) == 8 + 16
+
+    # The graph reference must be anchored on observed history, not the clock.
+    anchor = await storage.newest_observation_at(session)
+    assert anchor is not None
 
 
 async def test_mocked_discovery_and_update_preserves_history(

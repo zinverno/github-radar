@@ -643,6 +643,56 @@ async def get_developers_by_id(
     return result.scalars().all()
 
 
+async def repositories_by_id(
+    session: AsyncSession,
+    repository_ids: Sequence[int],
+) -> dict[int, RepositoryRow]:
+    """Repository rows for ``repository_ids`` keyed by id."""
+    if not repository_ids:
+        return {}
+    result = await session.execute(
+        select(RepositoryRow).where(RepositoryRow.id.in_(repository_ids))
+    )
+    return {row.id: row for row in result.scalars().all()}
+
+
+async def topics_by_repository_ids(
+    session: AsyncSession,
+    repository_ids: Sequence[int],
+) -> dict[int, list[TopicRow]]:
+    """All topic rows per repository, in one bounded query."""
+    if not repository_ids:
+        return {}
+    result = await session.execute(
+        select(TopicRow, RepositoryTopicRow.repository_id)
+        .join(RepositoryTopicRow, RepositoryTopicRow.topic_id == TopicRow.id)
+        .where(RepositoryTopicRow.repository_id.in_(repository_ids))
+        .order_by(TopicRow.name.asc())
+    )
+    by_repository: dict[int, list[TopicRow]] = {rid: [] for rid in repository_ids}
+    for topic, repository_id in result.all():
+        by_repository.setdefault(repository_id, []).append(topic)
+    return by_repository
+
+
+async def snapshots_by_repository_ids(
+    session: AsyncSession,
+    repository_ids: Sequence[int],
+) -> dict[int, list[SnapshotRow]]:
+    """All snapshot rows per repository, oldest first, in one bounded query."""
+    if not repository_ids:
+        return {}
+    result = await session.execute(
+        select(SnapshotRow)
+        .where(SnapshotRow.repository_id.in_(repository_ids))
+        .order_by(SnapshotRow.repository_id.asc(), SnapshotRow.captured_at.asc())
+    )
+    by_repository: dict[int, list[SnapshotRow]] = {rid: [] for rid in repository_ids}
+    for row in result.scalars().all():
+        by_repository.setdefault(row.repository_id, []).append(row)
+    return by_repository
+
+
 async def newest_observation_at(session: AsyncSession) -> datetime | None:
     """The newest contributor/repository snapshot ``captured_at`` dataset-wide.
 

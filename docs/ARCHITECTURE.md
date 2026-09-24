@@ -4,7 +4,9 @@ Architecture notes for github-radar. Everything here describes how the current
 code is put together, the contracts between layers, and the deliberate design
 decisions (and their trade-offs). Phase 1 = data foundation + CLI; Phase 2 =
 deterministic analytics (time-series, momentum, trends, topics, confidence)
-built purely on the snapshot history.
+built purely on the snapshot history; Phase 3 = developer intelligence built on
+observation deltas; Phase 4 = a derived ecosystem graph (developers,
+repositories, topics) built purely on the stored relational dataset.
 
 ## Overview
 
@@ -21,12 +23,16 @@ built purely on the snapshot history.
    services/  ──►  discovery/service.py   (search → persist → snapshot)
             └──►  services/update.py      (refresh tracked repos)
             └──►  services/developers.py  (throttled profile sync)
+            └──►  graph/ (Phase 4, read-only)  PostgreSQL ──► EcosystemGraph
+                  loader → model → overlap/relationships/metrics/bridges
+                  → reports ──► cli (ecosystem, bridges, related-*, graph sections)
 ```
 
 Data flows **in one direction**: GitHub JSON → Pydantic models → canonical
 domain dataclasses → ORM rows. The domain layer (`github_radar.domain`) is the
 sole vocabulary shared between `github/` and `storage/` — neither layer knows
-the other's types.
+the other's types. The graph layer is a **read-only consumer** of the ORM: it
+never writes back, so it can always be re-derived from freshly stored data.
 
 ## Module layout
 
@@ -52,6 +58,15 @@ the other's types.
 | `discovery/service.py` | Discovery orchestration |
 | `services/update.py` | Update orchestration |
 | `services/developers.py` | Throttled profile sync |
+| `graph/model.py` | `EcosystemGraph` + node/edge dataclasses, incremental construction, typed access, `filter()` |
+| `graph/loader.py` | Build the graph from PostgreSQL in a fixed number of batched queries |
+| `graph/overlap.py` | Jaccard `Overlap` shared by all pairwise relationships |
+| `graph/scoring.py` | Shared `clamp` / `mean` / weighted-score helpers + `recent_activity` |
+| `graph/confidence.py` | Data-coverage confidence (LOW/MEDIUM/HIGH) for relationships & bridges |
+| `graph/relationships.py` | Co-contributors, related repositories, related topics |
+| `graph/metrics.py` | Reach, degree/weighted-degree centrality, connected components |
+| `graph/bridges.py` | Developer / cross-topic / repository bridge intelligence |
+| `graph/reports.py` | Deterministic report projections used by the CLI |
 | `cli/app.py` | Typer CLI |
 | `migrations/` | Alembic migrations (hand-written `0001_initial`) |
 
@@ -328,6 +343,57 @@ fabricated zero.
 
 See `docs/DEVELOPERS.md` for the formulas and CLI commands.
 
+### Ecosystem graph (Phase 4)
+
+The graph is **derived, not stored**: `graph/loader.py` (`load_graph`) rebuilds
+the whole `EcosystemGraph` in memory from PostgreSQL on every command using a
+fixed number of batched statements (latest repository rows, topics by
+repository, snapshots by repository, contributor links, contributor snapshots,
+developers) — never a query per repository or per contributor link. The
+regression is pinned in the integration suite. `reference_now` is anchored to
+the newest stored `captured_at`, falling back to the wall clock only when the
+dataset is empty.
+
+It is a **co-contribution / co-occurrence** model, not a social graph: node
+types are `DEVELOPER` / `REPOSITORY` / `TOPIC` and edges are the relational
+rows themselves (`OWNS`, `CONTRIBUTES_TO` carrying share + observation history,
+`TAGGED_WITH`), collapsed under natural identifiers so duplicates never produce
+parallel edges. Connectedness is a statement about "transitively reachable
+through tracked repositories and topics" and nothing more.
+
+On top of the model:
+
+- `graph/overlap.py` — jaccard `Overlap` shared by every pairwise relationship.
+- `graph/relationships.py` — related repositories (developer overlap and topic
+  overlap reported separately, combined `relationship_score` only alongside its
+  components), related topics (repository/developer overlap separate), and
+  developer co-contribution strength (log-scaled breadth + capped per-repo
+  shares + momentum + observed co-activity).
+- `graph/metrics.py` — per-type reach; degree/weighted-degree centrality over
+  homogeneous neighbourhoods; deterministic Union-Find connected components
+  sized and ordered canonically (missing nodes → zero reach, never a raise).
+- `graph/confidence.py` — data-coverage confidence (≤ 1.0) for relationships
+  and bridges; below 3 distinct evidence repositories a `HIGH` is unreachable.
+- `graph/bridges.py` — the bridge producers. Developer bridges require ≥ 2
+  topic memberships, ≥ 2 distinct supporting repositories and ≥ 10 lifetime
+  contributions; below the minimums the score is hard-capped at
+  `SMALL_SAMPLE_CAP = 0.35` and flagged. All scores are bounded `[0, 1]`,
+  weights are module constants, and every component (including **missing**
+  ones) is listed per result. Followers never enter the score.
+- `graph/reports.py` — frozen report dataclasses (`EcosystemGraphReport`,
+  `DeveloperGraphReport`, `RepositoryGraphReport`, `TopicGraphReport`,
+  `CrossTopicBridgeReport`) are pure projections; a node absent from the graph
+  yields an empty report, never an exception.
+
+The CLI mounts the `bridges` group **twice** (top-level `bridges` and inside
+the `graph` group) so the legacy `graph bridges develop` spelling keeps
+working; `Typer.add_typer` only appends a `TyperInfo` reference, so mounting
+one app instance twice is safe. Unit tests pin the graph math and the CLI
+shape; the loader's bounded-query behavior is covered only by the PostgreSQL
+integration suite.
+
+See `docs/GRAPH.md` for the full model, formulas and command reference.
+
 ## Config knobs
 
 See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
@@ -344,7 +410,13 @@ See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
   between two `contributor_snapshots` of the same link is the observed activity
   signal, and a single snapshot is never treated as activity. A per-window
   commit-date signal would still require GraphQL, which is intentionally out of
-  scope.
+  scope. The graph inherits the same rule: `CONTRIBUTES_TO` edges from a single
+  observation never contribute "recent activity".
+- **The graph reflects tracked data.** Edge completeness is bounded by what
+  discovery has tracked; connectivity is a statement about the dataset, not all
+  of GitHub.
+- **Graph centrality is structural** (degree-based) by design — deterministic
+  and explainable, at the price of no spectral ranking.
 - **Discovery refreshes known repos cheaply.** Existing repositories are not
   re-fetched in detail during `discover`; use `update` for full refresh +
   snapshots.
@@ -381,3 +453,8 @@ See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
   queries, and costlier models slot in behind it without touching storage.
 - A future web/API frontend consumes `storage.repositories` queries; the CLI
   already shares them (`list_repos_with_latest`, `compute_stats`).
+- The ecosystem graph is fully **re-derivable**: `graph/loader.py` can rebuild
+  it from the relational rows at any time, so a future
+  `graph export --json` (node/edge document) or a persistent graph DB just
+  replays the same load + report pipeline rather than maintaining a second
+  source of truth.

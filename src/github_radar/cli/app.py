@@ -13,6 +13,11 @@ Commands:
     developers          list developer intelligence (relevance/activity/e…)   
     developer           show one developer's full intelligence digest
     emerging-developers list developers classified EMERGING
+    ecosystem           whole tracked ecosystem graph (nodes, edges, hubs, bridges)
+    bridges             bridge intelligence: develop / cross-topic / repos
+    related-topics      a topic's graph footprint and related topics
+    related-repos       a repository's graph footprint and related repositories
+    graph               ecosystem graph analytics (includes bridges)
     rate-limit          show current GitHub API quota
 """
 
@@ -49,6 +54,28 @@ from github_radar.github import (
     GitHubConfigurationError,
     RateLimitExceeded,
 )
+from github_radar.graph.bridges import (
+    DeveloperBridge,
+    compute_developer_bridge,
+    developer_bridges,
+    repository_bridges,
+)
+from github_radar.graph.loader import load_graph
+from github_radar.graph.metrics import NodeCentrality
+from github_radar.graph.model import EcosystemGraph
+from github_radar.graph.reports import (
+    DEFAULT_CENTRALITY_LIMIT,
+    CrossTopicBridgeReport,
+    DeveloperGraphReport,
+    EcosystemGraphReport,
+    RepositoryGraphReport,
+    TopicGraphReport,
+    build_cross_topic_bridge_report,
+    build_developer_report,
+    build_ecosystem_report,
+    build_repository_report,
+    build_topic_report,
+)
 from github_radar.services import (
     DeveloperDataset,
     DeveloperIntelligenceService,
@@ -57,6 +84,7 @@ from github_radar.services import (
 )
 from github_radar.storage import repositories as storage
 from github_radar.storage.db import make_engine, make_session_factory
+from github_radar.util import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -756,6 +784,12 @@ async def _topic_run(settings: Settings, *, topic: str, limit: int) -> None:
                     for report, relevance_score in by_topic[:limit]
                 ],
             )
+
+        graph, _reference = await _load_graph(session)
+        node = graph.topic_by_name(topic_name)
+        if node is not None:
+            graph_report = build_topic_report(graph, node.topic_id)
+            _print_topic_graph(graph_report)
     finally:
         await session.close()
         await engine.dispose()
@@ -1030,6 +1064,17 @@ async def _developer_run(
             )
             return
         _print_developer_report(dataset, report, window_days=window)
+
+        graph, reference_now = await _load_graph(session)
+        node = graph.developer_by_login(report.login)
+        if node is not None:
+            graph_report = build_developer_report(
+                graph,
+                node.developer_id,
+                reference_now=reference_now,
+                window_days=window,
+            )
+            _print_developer_graph(graph_report)
     finally:
         await session.close()
         await engine.dispose()
@@ -1271,6 +1316,704 @@ async def _emerging_run(
                 for r in emerging[:limit]
             ],
         )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# graph analytics
+# ---------------------------------------------------------------------------
+
+_graph_app = typer.Typer(
+    help="Ecosystem graph analytics derived from the tracked dataset.",
+    no_args_is_help=True,
+)
+_bridges_app = typer.Typer(
+    help="Bridge intelligence: developers connecting topic ecosystems.",
+    no_args_is_help=True,
+)
+
+# ``bridges`` is mounted twice — at the top level and inside the ``graph``
+# group — so both `github-radar bridges ...` and the older
+# `github-radar graph bridges ...` spellings stay working.
+app.add_typer(_bridges_app, name="bridges")
+_graph_app.add_typer(_bridges_app, name="bridges")
+app.add_typer(_graph_app, name="graph")
+
+
+async def _load_graph(
+    session: AsyncSession,
+) -> tuple[EcosystemGraph, datetime]:
+    """Load the derived graph, anchoring ``reference_now`` on real data.
+
+    Outcomes are reproducible between runs: the anchor is the newest observed
+    ``captured_at`` in the dataset, never the wall clock (falling back to the
+    wall clock only when nothing has ever been observed).
+    """
+    reference_now = await storage.newest_observation_at(session)
+    reference_now = reference_now or utcnow()
+    graph = await load_graph(session, reference_now=reference_now)
+    return graph, reference_now
+
+
+@_bridges_app.command("develop")
+def bridges_develop(
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    limit: int = typer.Option(10, "--limit", "-n", help="How many to show."),
+    topic: str | None = typer.Option(
+        None,
+        "--topic",
+        "-t",
+        help="Only developers with evidence in this topic ecosystem.",
+    ),
+    min_confidence: float | None = typer.Option(
+        None, "--min-confidence", help="Minimum bridge confidence (0..1)."
+    ),
+    login: str | None = typer.Option(
+        None, "--login", help="Show one developer's full bridge explanation."
+    ),
+) -> None:
+    """Rank developers by how strongly they bridge tracked topic ecosystems.
+
+    The bridge score is bounded and explainable: every result shows its
+    component breakdown, the topics and repositories behind it, and a data
+    coverage confidence. Followers never enter the score; a developer or
+    repository with thin evidence is hard-capped and marked as small sample.
+    """
+    settings = get_settings()
+    _run(
+        _bridges_develop_run(
+            settings,
+            window=_parse_window_days(window),
+            limit=limit,
+            topic=storage.normalize_topic(topic) if topic else None,
+            min_confidence=min_confidence,
+            login=login.strip().lower() if login else None,
+        )
+    )
+
+
+async def _bridges_develop_run(
+    settings: Settings,
+    *,
+    window: int,
+    limit: int,
+    topic: str | None,
+    min_confidence: float | None,
+    login: str | None,
+) -> None:
+    if min_confidence is not None and not 0.0 <= min_confidence <= 1.0:
+        typer.secho(
+            f"--min-confidence must be between 0 and 1 (got {min_confidence}).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    engine, session = await _engine_and_session(settings)
+    try:
+        reference_now = await storage.newest_observation_at(session)
+        reference_now = reference_now or utcnow()
+        graph = await load_graph(session, reference_now=reference_now)
+
+        if login is not None:
+            node = graph.developer_by_login(login)
+            if node is None:
+                typer.secho(
+                    f"No tracked developer named {login!r}.\n"
+                    f"  Run 'github-radar update' to observe contributor profiles.",
+                    fg=typer.colors.YELLOW,
+                )
+                return
+            bridge = compute_developer_bridge(
+                graph,
+                node.developer_id,
+                reference_now=reference_now,
+                window_days=window,
+            )
+            if (
+                min_confidence is not None
+                and bridge.confidence.score < min_confidence
+            ):
+                print(
+                    f"{bridge.login}'s bridge confidence "
+                    f"({bridge.confidence.score:.2f}) is below "
+                    f"--min-confidence {min_confidence}."
+                )
+                return
+            _print_developer_bridge(bridge)
+            return
+
+        if topic is not None and graph.topic_by_name(topic) is None:
+            typer.secho(
+                f"No tracked topic named {topic!r}.", fg=typer.colors.YELLOW
+            )
+            return
+
+        bridges = developer_bridges(
+            graph,
+            reference_now=reference_now,
+            window_days=window,
+            topic=topic,
+            limit=limit,
+            min_confidence=min_confidence,
+        )
+        if not bridges:
+            print(
+                "No developer bridges match — run 'github-radar update' or relax "
+                "the filters."
+            )
+            return
+
+        _print_table(
+            ["Login", "Bridge", "Topics", "Repos", "Small", "Confidence"],
+            [
+                [
+                    bridge.login,
+                    f"{bridge.bridge_score:.3f}",
+                    bridge.meaningful_topic_memberships,
+                    bridge.distinct_supporting_repositories,
+                    "yes" if bridge.small_sample else "",
+                    f"{bridge.confidence.score:.2f} "
+                    f"({bridge.confidence.level})",
+                ]
+                for bridge in bridges
+            ],
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+def _print_developer_bridge(bridge: DeveloperBridge) -> None:
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["login", bridge.login],
+            ["bridge score", f"{bridge.bridge_score:.3f}"],
+            ["meaningful topic memberships", bridge.meaningful_topic_memberships],
+            ["distinct supporting repositories", bridge.distinct_supporting_repositories],
+            ["small sample (capped)", "yes" if bridge.small_sample else "no"],
+            ["confidence",
+             f"{bridge.confidence.score:.2f} ({bridge.confidence.level})"],
+        ],
+    )
+    if bridge.repository_evidence:
+        _print_table(
+            ["Supporting repositories"],
+            [[full_name] for full_name in bridge.repository_evidence],
+        )
+
+    _print_table(
+        ["Component", "Score"],
+        [
+            [name, f"{value:.3f}"]
+            for name, value in sorted(bridge.components.items())
+        ],
+    )
+    _print_table(
+        ["Topic", "Repos", "Strength", "Contributions", "Recent Δ",
+         "History"],
+        [
+            [
+                evidence.topic,
+                evidence.repository_count,
+                f"{evidence.topic_strength:.2f}",
+                evidence.total_contributions,
+                _fmt(evidence.recent_delta),
+                f"{evidence.history_coverage:.0%}",
+            ]
+            for evidence in bridge.topic_evidence
+        ],
+    )
+    print(f"\nConfidence: {bridge.confidence.explanation}")
+
+
+# ---------------------------------------------------------------------------
+# bridges cross-topic / bridges repos
+# ---------------------------------------------------------------------------
+
+def _print_cross_topic_report(report: CrossTopicBridgeReport) -> None:
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["topic A", report.topic_a],
+            ["topic B", report.topic_b],
+            ["bridging developers", report.bridge_count],
+            ["distinct bridging developers", report.distinct_bridging_developers],
+            ["average bridge score", f"{report.average_bridge_score:.3f}"],
+            ["shared tracked repositories",
+             ", ".join(report.shared_tracked_repositories) or "—"],
+        ],
+    )
+    if report.top_bridges:
+        _print_table(
+            ["Developer", "Bridge", "Confidence", "A repos", "B repos",
+             "Shared tracked"],
+            [
+                [
+                    bridge.login,
+                    f"{bridge.bridge_score:.3f}",
+                    f"{bridge.confidence.score:.2f} ({bridge.confidence.level})",
+                    bridge.topic_a.repository_count,
+                    bridge.topic_b.repository_count,
+                    ", ".join(bridge.shared_tracked_repositories) or "—",
+                ]
+                for bridge in report.top_bridges
+            ],
+        )
+
+
+@_bridges_app.command("cross-topic")
+def bridges_cross_topic(
+    topic_a: str = typer.Argument(
+        ..., help="First topic ecosystem, e.g. mcp."
+    ),
+    topic_b: str = typer.Argument(
+        ..., help="Second topic ecosystem, e.g. ai."
+    ),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    limit: int = typer.Option(10, "--limit", "-n", help="How many to show."),
+) -> None:
+    """Developers bridging two topic ecosystems.
+
+    Shows every developer with observed evidence in *both* ecosystems, the
+    shared tracked repositories that make the bridge real, and an aggregate of
+    the whole bridge ecosystem between the two topics.
+    """
+    settings = get_settings()
+    _run(
+        _bridges_cross_topic_run(
+            settings,
+            topic_a=storage.normalize_topic(topic_a),
+            topic_b=storage.normalize_topic(topic_b),
+            window=_parse_window_days(window),
+            limit=limit,
+        )
+    )
+
+
+async def _bridges_cross_topic_run(
+    settings: Settings,
+    *,
+    topic_a: str,
+    topic_b: str,
+    window: int,
+    limit: int,
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        graph, reference_now = await _load_graph(session)
+        for name in (topic_a, topic_b):
+            if graph.topic_by_name(name) is None:
+                typer.secho(
+                    f"No tracked topic named {name!r}.", fg=typer.colors.YELLOW
+                )
+                return
+        report = build_cross_topic_bridge_report(
+            graph,
+            topic_a,
+            topic_b,
+            reference_now=reference_now,
+            window_days=window,
+            limit=limit,
+        )
+        _print_cross_topic_report(report)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@_bridges_app.command("repos")
+def bridges_repos(
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    limit: int = typer.Option(10, "--limit", "-n", help="How many to show."),
+    min_confidence: float | None = typer.Option(
+        None, "--min-confidence", help="Minimum bridge confidence (0..1)."
+    ),
+) -> None:
+    """Rank repositories as cross-ecosystem bridges.
+
+    A repository bridges when the people working on it cross into other topic
+    ecosystems. The score is explainable and bounded; repositories with thin
+    evidence are hard-capped and flagged as small samples.
+    """
+    settings = get_settings()
+    _run(
+        _bridges_repos_run(
+            settings,
+            window=_parse_window_days(window),
+            limit=limit,
+            min_confidence=min_confidence,
+        )
+    )
+
+
+async def _bridges_repos_run(
+    settings: Settings,
+    *,
+    window: int,
+    limit: int,
+    min_confidence: float | None,
+) -> None:
+    if min_confidence is not None and not 0.0 <= min_confidence <= 1.0:
+        typer.secho(
+            f"--min-confidence must be between 0 and 1 (got {min_confidence}).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    engine, session = await _engine_and_session(settings)
+    try:
+        graph, reference_now = await _load_graph(session)
+        bridges = repository_bridges(
+            graph,
+            reference_now=reference_now,
+            window_days=window,
+            limit=limit,
+            min_confidence=min_confidence,
+        )
+        if not bridges:
+            print(
+                "No repository bridges match — run 'github-radar update' or relax "
+                "the filters."
+            )
+            return
+        _print_table(
+            ["Repository", "Bridge", "Contributors", "Topics", "Cross-repo",
+             "Cross-topic", "Small", "Confidence"],
+            [
+                [
+                    bridge.full_name,
+                    f"{bridge.bridge_score:.3f}",
+                    bridge.contributor_count,
+                    bridge.topic_count,
+                    bridge.cross_repository_contributors,
+                    bridge.cross_topic_contributors,
+                    "yes" if bridge.small_sample else "",
+                    f"{bridge.confidence.score:.2f} "
+                    f"({bridge.confidence.level})",
+                ]
+                for bridge in bridges
+            ],
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# ecosystem / related-topics / related-repos
+# ---------------------------------------------------------------------------
+
+def _print_centrality(rows: tuple[NodeCentrality, ...]) -> None:
+    _print_table(
+        ["Node", "Degree", "Weighted degree"],
+        [[item.label, item.degree, item.weighted_degree] for item in rows],
+    )
+
+
+def _print_ecosystem_report(report: EcosystemGraphReport) -> None:
+    _print_table(
+        ["Measure", "Value"],
+        [
+            ["developers", report.developer_count],
+            ["repositories", report.repository_count],
+            ["topics", report.topic_count],
+            ["owns edges", report.owns_edges],
+            ["contributes_to edges", report.contributes_edges],
+            ["tagged_with edges", report.tagged_edges],
+            ["connected components", report.component_count],
+        ],
+    )
+    largest = report.largest_component
+    if largest is not None:
+        _print_table(
+            ["Largest component", "Value"],
+            [
+                ["nodes", largest.node_count],
+                ["developers", largest.developer_count],
+                ["repositories", largest.repository_count],
+                ["topics", largest.topic_count],
+                ["developers", ", ".join(largest.developer_logins) or "—"],
+                ["repositories",
+                 ", ".join(largest.repository_full_names) or "—"],
+                ["topics", ", ".join(largest.topic_names) or "—"],
+            ],
+        )
+    if report.top_developer_centrality:
+        print("\nTop developer hubs")
+        _print_centrality(report.top_developer_centrality)
+    if report.top_repository_centrality:
+        print("\nTop repository hubs")
+        _print_centrality(report.top_repository_centrality)
+    if report.top_topic_centrality:
+        print("\nTop topic hubs")
+        _print_centrality(report.top_topic_centrality)
+    if report.top_developer_bridges:
+        _print_table(
+            ["Login", "Bridge", "Topics", "Repos", "Confidence"],
+            [
+                [
+                    bridge.login,
+                    f"{bridge.bridge_score:.3f}",
+                    bridge.meaningful_topic_memberships,
+                    bridge.distinct_supporting_repositories,
+                    f"{bridge.confidence.score:.2f} "
+                    f"({bridge.confidence.level})",
+                ]
+                for bridge in report.top_developer_bridges
+            ],
+        )
+
+
+@app.command("ecosystem")
+def ecosystem(
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    centrality_limit: int = typer.Option(
+        DEFAULT_CENTRALITY_LIMIT,
+        "--centrality-limit",
+        help="How many hubs to show per node type.",
+    ),
+    bridge_limit: int = typer.Option(
+        5, "--bridge-limit", help="How many top developer bridges to show."
+    ),
+) -> None:
+    """Top-level view of the whole tracked ecosystem graph."""
+    settings = get_settings()
+    _run(
+        _ecosystem_run(
+            settings,
+            window=_parse_window_days(window),
+            centrality_limit=centrality_limit,
+            bridge_limit=bridge_limit,
+        )
+    )
+
+
+async def _ecosystem_run(
+    settings: Settings,
+    *,
+    window: int,
+    centrality_limit: int,
+    bridge_limit: int,
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        graph, reference_now = await _load_graph(session)
+        report = build_ecosystem_report(
+            graph,
+            reference_now=reference_now,
+            window_days=window,
+            centrality_limit=centrality_limit,
+            bridge_limit=bridge_limit,
+        )
+        _print_ecosystem_report(report)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+def _print_developer_graph(report: DeveloperGraphReport) -> None:
+    print("\nGraph footprint")
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["login", report.login],
+            ["repositories (contributed)", report.reach.contributed_repositories],
+            ["repositories (owned)", report.reach.owned_repositories],
+            ["distinct repositories", report.reach.reached_repositories],
+            ["distinct developers reached", report.reach.reached_developers],
+            ["distinct topics reached", report.reach.reached_topics],
+            ["centrality (degree)",
+             report.centrality.degree if report.centrality else None],
+            ["centrality (weighted degree)",
+             report.centrality.weighted_degree if report.centrality else None],
+        ],
+    )
+    if report.co_contributors:
+        _print_table(
+            ["Co-contributor", "Shared repos", "Strength", "Confidence"],
+            [
+                [
+                    row.login,
+                    row.shared_repository_count,
+                    f"{row.strength:.3f}",
+                    (
+                        f"{row.confidence.score:.3f} ({row.confidence.level})"
+                        if row.confidence is not None
+                        else None
+                    ),
+                ]
+                for row in report.co_contributors
+            ],
+        )
+    if report.bridge is not None:
+        _print_developer_bridge(report.bridge)
+
+
+def _print_topic_graph(report: TopicGraphReport) -> None:
+    print("\nGraph footprint")
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["topic", report.name],
+            ["repositories", report.reach.repositories],
+            ["contributing developers", report.reach.contributing_developers],
+            ["owning developers", report.reach.owning_developers],
+            ["associated developers", report.reach.associated_developers],
+            ["centrality (degree)",
+             report.centrality.degree if report.centrality else None],
+            ["centrality (weighted degree)",
+             report.centrality.weighted_degree if report.centrality else None],
+        ],
+    )
+    if report.related_topics:
+        _print_table(
+            ["Related topic", "Shared repos", "Shared devs", "Repo jaccard",
+             "Dev jaccard", "Confidence"],
+            [
+                [
+                    row.topic,
+                    row.shared_repository_count,
+                    row.shared_developer_count,
+                    f"{row.repository_overlap.jaccard:.3f}",
+                    f"{row.developer_overlap.jaccard:.3f}",
+                    f"{row.confidence.score:.3f} ({row.confidence.level})",
+                ]
+                for row in report.related_topics
+            ],
+        )
+
+
+def _print_repository_graph(report: RepositoryGraphReport) -> None:
+    print("\nGraph footprint")
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["repository", report.full_name],
+            ["contributing developers", report.reach.contributing_developers],
+            ["owning developers", report.reach.owning_developers],
+            ["topics", report.reach.topics],
+            ["sibling repositories", report.reach.sibling_repositories],
+            ["centrality (degree)",
+             report.centrality.degree if report.centrality else None],
+            ["centrality (weighted degree)",
+             report.centrality.weighted_degree if report.centrality else None],
+            ["bridge score",
+             f"{report.bridge.bridge_score:.3f}" if report.bridge is not None else None],
+        ],
+    )
+    if report.related_repositories:
+        _print_table(
+            ["Related repository", "Shared devs", "Shared topics", "Dev overlap",
+             "Topic overlap", "Score", "Confidence"],
+            [
+                [
+                    row.full_name,
+                    row.shared_developer_count,
+                    row.shared_topic_count,
+                    f"{row.developer_overlap.jaccard:.3f}",
+                    f"{row.topic_overlap.jaccard:.3f}",
+                    f"{row.relationship_score:.3f}",
+                    f"{row.confidence.score:.3f} ({row.confidence.level})",
+                ]
+                for row in report.related_repositories
+            ],
+        )
+
+
+@app.command("related-topics")
+def related_topics_command(
+    topic: str = typer.Argument(..., help="Topic name, e.g. mcp."),
+    limit: int = typer.Option(
+        5, "--limit", "-n", help="How many related topics to show."
+    ),
+) -> None:
+    """Show a topic's graph footprint and the topics it overlaps."""
+    settings = get_settings()
+    _run(
+        _related_topics_run(
+            settings, topic=storage.normalize_topic(topic), limit=limit
+        )
+    )
+
+
+async def _related_topics_run(
+    settings: Settings, *, topic: str, limit: int
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        graph, _reference = await _load_graph(session)
+        node = graph.topic_by_name(topic)
+        if node is None:
+            typer.secho(
+                f"No tracked topic named {topic!r}.", fg=typer.colors.YELLOW
+            )
+            return
+        report = build_topic_report(graph, node.topic_id, related_limit=limit)
+        _print_topic_graph(report)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@app.command("related-repos")
+def related_repos_command(
+    repository: str = typer.Argument(
+        ..., help="Full repository name, e.g. acme/widget."
+    ),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    limit: int = typer.Option(
+        5, "--limit", "-n", help="How many related repositories to show."
+    ),
+) -> None:
+    """Show a repository's graph footprint and the repositories it overlaps."""
+    settings = get_settings()
+    _run(
+        _related_repos_run(
+            settings,
+            repository=repository.strip().lower(),
+            window=_parse_window_days(window),
+            limit=limit,
+        )
+    )
+
+
+async def _related_repos_run(
+    settings: Settings, *, repository: str, window: int, limit: int
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        graph, reference_now = await _load_graph(session)
+        node = graph.repository_by_full_name(repository)
+        if node is None:
+            typer.secho(
+                f"No tracked repository named {repository!r}.\n"
+                f"  Run 'github-radar update' to observe more repositories.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+        report = build_repository_report(
+            graph,
+            node.repository_id,
+            reference_now=reference_now,
+            window_days=window,
+            related_limit=limit,
+        )
+        _print_repository_graph(report)
     finally:
         await session.close()
         await engine.dispose()
