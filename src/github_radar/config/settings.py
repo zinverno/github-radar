@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     # Search pagination size (GitHub allows up to 100).
     search_per_page: int = 100
 
+    # LLM provider (OpenAI-compatible chat completions API).
+    ai_api_key: str = ""
+    ai_base_url: str = "https://api.openai.com/v1"
+    ai_model: str = ""
+    ai_timeout_seconds: float = 60.0
+    ai_max_output_tokens: int = 2048
+    ai_temperature: float = 0.2
+    ai_max_requests_per_run: int = 20
+    ai_max_evidence_chars: int = 12000
+
     log_level: str = "INFO"
 
     @field_validator("database_url")
@@ -81,6 +91,55 @@ class Settings(BaseSettings):
         if value < 0:
             raise ValueError("rate_limit_pause_threshold must be >= 0")
         return value
+
+    @field_validator("ai_timeout_seconds")
+    @classmethod
+    def _validate_ai_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("ai_timeout_seconds must be > 0")
+        return value
+
+    @field_validator("ai_max_output_tokens")
+    @classmethod
+    def _validate_ai_max_output_tokens(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("ai_max_output_tokens must be > 0")
+        return value
+
+    @field_validator("ai_temperature")
+    @classmethod
+    def _validate_ai_temperature(cls, value: float) -> float:
+        if not 0.0 <= value <= 2.0:
+            raise ValueError("ai_temperature must be between 0 and 2")
+        return value
+
+    @field_validator("ai_max_requests_per_run")
+    @classmethod
+    def _validate_ai_max_requests_per_run(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("ai_max_requests_per_run must be > 0")
+        return value
+
+    @field_validator("ai_max_evidence_chars")
+    @classmethod
+    def _validate_ai_max_evidence_chars(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("ai_max_evidence_chars must be > 0")
+        return value
+
+    def require_ai_config(self) -> tuple[str, str, str]:
+        """Return ``(base_url, api_key, model)`` or raise a clear error."""
+        if not self.ai_api_key:
+            raise SettingsError(
+                "AI_API_KEY is not set. Configure your LLM provider in .env "
+                "(see .env.example). AI commands need a working provider."
+            )
+        if not self.ai_model:
+            raise SettingsError(
+                "AI_MODEL is not set. Configure your LLM provider in .env "
+                "(see .env.example)."
+            )
+        return self.ai_base_url.rstrip("/"), self.ai_api_key, self.ai_model
 
     def require_github_token(self) -> str:
         if not self.github_token:

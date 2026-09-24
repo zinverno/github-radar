@@ -18,12 +18,14 @@ Commands:
     related-topics      a topic's graph footprint and related topics
     related-repos       a repository's graph footprint and related repositories
     graph               ecosystem graph analytics (includes bridges)
+    ai                  LLM synthesis of measured facts (repo/topic/developer/…)
     rate-limit          show current GitHub API quota
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -35,6 +37,41 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from github_radar.ai.cache import SqlArtifactStore
+from github_radar.ai.confidence import (
+    bridge_level,
+    developer_level,
+    ecosystem_level,
+    repo_level,
+    topic_aggregate_level,
+)
+from github_radar.ai.errors import AIConfigurationError, AIError
+from github_radar.ai.evidence import (
+    ContributorDigest,
+    RepositoryDigest,
+    TopicRepoDigest,
+    bridge_evidence,
+    developer_evidence,
+    ecosystem_evidence,
+    repository_evidence,
+    topic_evidence,
+)
+from github_radar.ai.models import (
+    AIArtifact,
+    ArtifactType,
+    ConfidenceLevel,
+    EvidenceBundle,
+)
+from github_radar.ai.openai_compatible import make_provider
+from github_radar.ai.prompts import PROMPT_VERSIONS
+from github_radar.ai.provider import AIProvider
+from github_radar.ai.service import (
+    RunBudget,
+    SynthesisRequest,
+    SynthesisResult,
+    synthesize,
+)
+from github_radar.ai.textual import TextualEvidence
 from github_radar.analytics import (
     WEIGHTS,
     DeveloperProfileMetrics,
@@ -47,6 +84,7 @@ from github_radar.analytics import (
     compute_momentum,
     rank_repositories,
 )
+from github_radar.analytics.trends import classify_trend
 from github_radar.config import Settings, SettingsError, get_settings
 from github_radar.discovery import DiscoveryReport, RepositoryDiscoveryService
 from github_radar.github import (
@@ -83,6 +121,7 @@ from github_radar.services import (
     RepositoryUpdateService,
 )
 from github_radar.storage import repositories as storage
+from github_radar.storage.ai_artifacts import serialize_evidence
 from github_radar.storage.db import make_engine, make_session_factory
 from github_radar.util import utcnow
 
@@ -154,6 +193,22 @@ def _run(coro: Any) -> Any:
         typer.secho(
             f"Configuration error: {exc}\n  Configure the missing value in your "
             ".env file (see .env.example).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except AIConfigurationError as exc:
+        typer.secho(
+            f"AI is not configured: {exc}\n"
+            "  Set AI_API_KEY, AI_BASE_URL and AI_MODEL in your .env file "
+            "(see .env.example) to use AI synthesis commands.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except AIError as exc:
+        typer.secho(
+            f"AI synthesis failed: {exc}",
             fg=typer.colors.RED,
             err=True,
         )
@@ -2054,8 +2109,625 @@ def show_rate_limit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# ai synthesis (Phase 5)
 # ---------------------------------------------------------------------------
+
+_ai_app = typer.Typer(
+    help="LLM synthesis of the measured facts (cached, deterministic confidence).",
+    no_args_is_help=True,
+)
+app.add_typer(_ai_app, name="ai")
+
+
+def _tokens_label(artifact: AIArtifact) -> str:
+    if artifact.input_tokens is None and artifact.output_tokens is None:
+        return "unavailable"
+    return (
+        f"{artifact.input_tokens if artifact.input_tokens is not None else '?'} in / "
+        f"{artifact.output_tokens if artifact.output_tokens is not None else '?'} out"
+    )
+
+
+def _print_ai_artifact(
+    artifact: AIArtifact, bundle: EvidenceBundle, outcome: SynthesisResult
+) -> None:
+    """Human-oriented synthesis output: synthesis first, facts last."""
+    print(artifact.headline)
+    print(f"\n[{artifact.confidence}] {artifact.summary}")
+    if artifact.key_points:
+        print("\nKey points")
+        for point in artifact.key_points:
+            refs = ", ".join(point.evidence_ids)
+            print(f"  • {point.text}  [{refs}]")
+    if artifact.unknowns:
+        print("\nUnknowns / limitations")
+        for unknown in artifact.unknowns:
+            print(f"  • {unknown}")
+    else:
+        print("\nUnknowns / limitations: the model reported none; thin history is "
+              "still reflected by the deterministic confidence level.")
+
+    print("\nMeasured facts (deterministic Phase 2–4 evidence)")
+    for item in bundle.items:
+        payload = item.payload
+        if len(payload) > 600:
+            payload = payload[:600].rstrip() + " …"
+        print(f"  [{item.id}] {item.kind} — {item.source}: {payload}")
+
+    print("\nArtifact metadata")
+    _print_table(
+        ["Field", "Value"],
+        [
+            ["entity", f"{artifact.entity_type} {artifact.entity_key}"],
+            ["artifact type", artifact.artifact_type],
+            ["window", f"{artifact.window_days}d"],
+            ["prompt version", artifact.prompt_version],
+            ["provider / model", f"{artifact.provider} / {artifact.model}"],
+            ["confidence", artifact.confidence],
+            ["generated at", _fmt(artifact.generated_at)],
+            ["source", "cached" if outcome.cache_hit else "synthesized now"],
+            ["tokens (in/out)", _tokens_label(artifact)],
+        ],
+    )
+
+
+def _print_ai_json(
+    artifact: AIArtifact, outcome: SynthesisResult, generated_at: datetime
+) -> None:
+    print(
+        json.dumps(
+            {
+                "cache_hit": outcome.cache_hit,
+                "generated_at": generated_at.isoformat(timespec="seconds"),
+                "artifact": artifact.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+async def _ai_run(
+    *,
+    bundle: EvidenceBundle,
+    confidence: ConfidenceLevel,
+    artifact_type: ArtifactType,
+    window_days: int,
+    provider: AIProvider,
+    store: SqlArtifactStore,
+    budget: RunBudget,
+    max_evidence_chars: int,
+    force: bool,
+    json_output: bool,
+) -> None:
+    request = SynthesisRequest(
+        entity_type=bundle.entity_type,
+        entity_key=bundle.entity_key,
+        artifact_type=artifact_type,
+        window_days=window_days,
+        bundle=bundle,
+        confidence=confidence,
+        bundle_json=serialize_evidence(bundle),
+        provider=provider,
+        store=store,
+        budget=budget,
+        generated_at=utcnow(),
+        force=force,
+        max_evidence_chars=max_evidence_chars,
+    )
+    outcome = await synthesize(request)
+    if json_output:
+        _print_ai_json(outcome.artifact, outcome, request.generated_at)
+    else:
+        _print_ai_artifact(outcome.artifact, bundle, outcome)
+
+
+@_ai_app.command("repo")
+def ai_repo(
+    owner_repo: str = typer.Argument(..., help="Repository as OWNER/NAME."),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    trend: bool = typer.Option(
+        False, "--trend", help="Synthesize the trajectory (repository-trend-v1)."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Bypass the model-result cache and re-synthesize."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the artifact as JSON."
+    ),
+) -> None:
+    """Synthesize an LLM narrative for ONE tracked repository.
+
+    The model explains only the measured facts; it never measures anything
+    itself. Results are cached and replayed until the evidence changes.
+    """
+    settings = get_settings()
+    parts = owner_repo.strip("/").split("/")
+    if len(parts) != 2:
+        typer.secho(
+            f"Expected OWNER/NAME, got {owner_repo!r}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    _run(
+        _ai_repo_run(
+            settings,
+            owner=parts[0],
+            name=parts[1],
+            window=_parse_window_days(window),
+            trend=trend,
+            force=force,
+            json_output=json_output,
+        )
+    )
+
+
+async def _ai_repo_run(
+    settings: Settings,
+    *,
+    owner: str,
+    name: str,
+    window: int,
+    trend: bool,
+    force: bool,
+    json_output: bool,
+) -> None:
+    client = _make_client(settings, require_auth=True)
+    textual = TextualEvidence(client)
+    engine, session = await _engine_and_session(settings)
+    provider = make_provider(settings)
+    store = SqlArtifactStore(session)
+    budget = RunBudget(total=settings.ai_max_requests_per_run)
+    try:
+        full_name = f"{owner}/{name}"
+        row = await storage.get_repository_by_full_name(session, full_name)
+        if row is None:
+            typer.secho(
+                f"{full_name} is not tracked yet.\n"
+                f'  Discover it with: github-radar discover "{owner}/{name}"',
+                fg=typer.colors.YELLOW,
+            )
+            return
+
+        topics = tuple(
+            t.name for t in await storage.topics_for_repository(session, row.id)
+        )
+        contributor_rows = await storage.contributors_for_repository(session, row.id)
+        contributors = tuple(
+            ContributorDigest(login=dev.login, contributions=contribs)
+            for dev, contribs, _last_seen in contributor_rows
+        )
+        snapshots = await storage.snapshots_for_repository(session, row.id)
+        latest = await storage.latest_snapshot(session, row.id)
+        metrics = compute_metrics([s.to_domain() for s in snapshots])
+        reference_now = latest.captured_at if latest is not None else None
+        momentum = (
+            compute_momentum(metrics, reference_now=reference_now)
+            if reference_now is not None
+            else None
+        )
+        trend_obj = (
+            classify_trend(metrics, momentum, reference_now=reference_now)
+            if reference_now is not None
+            else None
+        )
+
+        readme = await textual.readme(row.owner_login, row.name)
+        releases = await textual.releases(row.owner_login, row.name)
+        commits = await textual.commits(row.owner_login, row.name)
+
+        digest = RepositoryDigest(
+            full_name=row.full_name,
+            owner_login=row.owner_login,
+            description=row.description,
+            homepage=row.homepage,
+            primary_language=row.primary_language,
+            default_branch=row.default_branch,
+            visibility=row.visibility,
+            is_fork=row.is_fork,
+            is_archived=row.is_archived,
+            is_disabled=row.is_disabled,
+            is_template=row.is_template,
+            github_created_at=row.created_at,
+            github_updated_at=row.updated_at,
+            pushed_at=row.pushed_at,
+            topics=topics,
+            contributors=contributors,
+            latest_captured_at=reference_now,
+            snapshot_count=len(snapshots),
+            first_snapshot_at=snapshots[0].captured_at if snapshots else None,
+            metrics=metrics,
+            momentum=momentum,
+            trend=trend_obj,
+            textual={"readme": readme, "releases": releases, "commits": commits},
+        )
+        bundle = repository_evidence(digest, window_days=window)
+        await _ai_run(
+            bundle=bundle,
+            confidence=repo_level(metrics, window),
+            artifact_type="repository-trend" if trend else "repository-summary",
+            window_days=window,
+            provider=provider,
+            store=store,
+            budget=budget,
+            max_evidence_chars=settings.ai_max_evidence_chars,
+            force=force,
+            json_output=json_output,
+        )
+    finally:
+        await client.close()
+        await session.close()
+        await engine.dispose()
+
+
+@_ai_app.command("topic")
+def ai_topic(
+    topic: str = typer.Argument(..., help="Topic name, e.g. mcp."),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Bypass the model-result cache and re-synthesize."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the artifact as JSON."
+    ),
+) -> None:
+    """Synthesize an LLM narrative for ONE tracked topic."""
+    settings = get_settings()
+    _run(
+        _ai_topic_run(
+            settings,
+            topic=storage.normalize_topic(topic),
+            window=_parse_window_days(window),
+            force=force,
+            json_output=json_output,
+        )
+    )
+
+
+async def _ai_topic_run(
+    settings: Settings,
+    *,
+    topic: str,
+    window: int,
+    force: bool,
+    json_output: bool,
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    provider = make_provider(settings)
+    store = SqlArtifactStore(session)
+    budget = RunBudget(total=settings.ai_max_requests_per_run)
+    try:
+        tracked = await _collect_tracked(session)
+        by_topic: dict[str, list[RepositoryReport]] = {}
+        for item in tracked:
+            if topic in item.topics:
+                by_topic.setdefault(topic, []).append(item.report)
+        if not by_topic:
+            typer.secho(
+                f"No tracked topic named {topic!r}.", fg=typer.colors.YELLOW
+            )
+            return
+        aggregate = next(a for a in aggregate_topics(by_topic) if a.name == topic)
+
+        graph, _reference = await _load_graph(session)
+        node = graph.topic_by_name(topic)
+        graph_report = (
+            build_topic_report(graph, node.topic_id) if node is not None else None
+        )
+
+        reference_top_now = (
+            await storage.newest_observation_at(session)
+        ) or utcnow()
+        digests = [
+            TopicRepoDigest(
+                full_name=item.report.full_name,
+                stars=item.report.metrics.latest_counts.get("stars"),
+                momentum_score=(
+                    item.report.momentum.score
+                    if item.report.momentum is not None
+                    else None
+                ),
+                trend_class=_repo_trend_short(item.report, reference_top_now),
+                confidence_level=repo_level(item.report.metrics, window),
+            )
+            for item in tracked
+            if topic in item.topics
+        ]
+        bundle = topic_evidence(
+            topic, aggregate, digests, graph_report, window_days=window
+        )
+        await _ai_run(
+            bundle=bundle,
+            confidence=topic_aggregate_level(aggregate),
+            artifact_type="topic-summary",
+            window_days=window,
+            provider=provider,
+            store=store,
+            budget=budget,
+            max_evidence_chars=settings.ai_max_evidence_chars,
+            force=force,
+            json_output=json_output,
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+def _repo_trend_short(
+    report: RepositoryReport, reference_now: datetime | None
+) -> str | None:
+    """The trend class label for one repository, or ``None`` if undefined."""
+    if reference_now is None or report.momentum is None:
+        return None
+    trend = classify_trend(report.metrics, report.momentum, reference_now=reference_now)
+    return f"{trend.trend} ({trend.label})"
+
+
+@_ai_app.command("developer")
+def ai_developer(
+    login: str = typer.Argument(..., help="GitHub login of the developer."),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Bypass the model-result cache and re-synthesize."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the artifact as JSON."
+    ),
+) -> None:
+    """Synthesize an LLM narrative for ONE tracked developer."""
+    settings = get_settings()
+    _run(
+        _ai_developer_run(
+            settings,
+            login=login.strip().lower(),
+            window=_parse_window_days(window),
+            force=force,
+            json_output=json_output,
+        )
+    )
+
+
+async def _ai_developer_run(
+    settings: Settings,
+    *,
+    login: str,
+    window: int,
+    force: bool,
+    json_output: bool,
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    provider = make_provider(settings)
+    store = SqlArtifactStore(session)
+    budget = RunBudget(total=settings.ai_max_requests_per_run)
+    try:
+        _dataset, reports = await _build_developer_reports(
+            session, window_days=window
+        )
+        report = next(
+            (report for report in reports if report.login.lower() == login),
+            None,
+        )
+        if report is None:
+            typer.secho(
+                f"No tracked developer named {login!r}.\n"
+                f"  Run 'github-radar update' to observe contributor profiles.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+        graph, reference_now = await _load_graph(session)
+        node = graph.developer_by_login(report.login)
+        graph_report = (
+            build_developer_report(
+                graph,
+                node.developer_id,
+                reference_now=reference_now,
+                window_days=window,
+            )
+            if node is not None
+            else None
+        )
+        bundle = developer_evidence(report, graph_report, window_days=window)
+        await _ai_run(
+            bundle=bundle,
+            confidence=developer_level(report),
+            artifact_type="developer-summary",
+            window_days=window,
+            provider=provider,
+            store=store,
+            budget=budget,
+            max_evidence_chars=settings.ai_max_evidence_chars,
+            force=force,
+            json_output=json_output,
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@_ai_app.command("ecosystem")
+def ai_ecosystem(
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Bypass the model-result cache and re-synthesize."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the artifact as JSON."
+    ),
+) -> None:
+    """Synthesize an LLM narrative for the whole tracked ecosystem."""
+    settings = get_settings()
+    _run(
+        _ai_ecosystem_run(
+            settings,
+            window=_parse_window_days(window),
+            force=force,
+            json_output=json_output,
+        )
+    )
+
+
+async def _ai_ecosystem_run(
+    settings: Settings,
+    *,
+    window: int,
+    force: bool,
+    json_output: bool,
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    provider = make_provider(settings)
+    store = SqlArtifactStore(session)
+    budget = RunBudget(total=settings.ai_max_requests_per_run)
+    try:
+        graph, reference_now = await _load_graph(session)
+        report = build_ecosystem_report(
+            graph,
+            reference_now=reference_now,
+            window_days=window,
+        )
+        bundle = ecosystem_evidence(report, window_days=window)
+        await _ai_run(
+            bundle=bundle,
+            confidence=ecosystem_level(report),
+            artifact_type="ecosystem-summary",
+            window_days=window,
+            provider=provider,
+            store=store,
+            budget=budget,
+            max_evidence_chars=settings.ai_max_evidence_chars,
+            force=force,
+            json_output=json_output,
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@_ai_app.command("bridge")
+def ai_bridge(
+    topic_a: str = typer.Argument(..., help="First topic ecosystem, e.g. mcp."),
+    topic_b: str = typer.Argument(..., help="Second topic ecosystem, e.g. ai."),
+    window: str = typer.Option(
+        "7d", "--window", help="Activity window: 1d, 7d, or 30d."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Bypass the model-result cache and re-synthesize."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the artifact as JSON."
+    ),
+) -> None:
+    """Synthesize an LLM narrative for a two-topic bridge ecosystem."""
+    settings = get_settings()
+    _run(
+        _ai_bridge_run(
+            settings,
+            topic_a=storage.normalize_topic(topic_a),
+            topic_b=storage.normalize_topic(topic_b),
+            window=_parse_window_days(window),
+            force=force,
+            json_output=json_output,
+        )
+    )
+
+
+async def _ai_bridge_run(
+    settings: Settings,
+    *,
+    topic_a: str,
+    topic_b: str,
+    window: int,
+    force: bool,
+    json_output: bool,
+) -> None:
+    engine, session = await _engine_and_session(settings)
+    provider = make_provider(settings)
+    store = SqlArtifactStore(session)
+    budget = RunBudget(total=settings.ai_max_requests_per_run)
+    try:
+        graph, reference_now = await _load_graph(session)
+        for name in (topic_a, topic_b):
+            if graph.topic_by_name(name) is None:
+                typer.secho(
+                    f"No tracked topic named {name!r}.", fg=typer.colors.YELLOW
+                )
+                return
+        report = build_cross_topic_bridge_report(
+            graph,
+            topic_a,
+            topic_b,
+            reference_now=reference_now,
+            window_days=window,
+        )
+        bundle = bridge_evidence(report, window_days=window)
+        await _ai_run(
+            bundle=bundle,
+            confidence=bridge_level(report),
+            artifact_type="bridge-summary",
+            window_days=window,
+            provider=provider,
+            store=store,
+            budget=budget,
+            max_evidence_chars=settings.ai_max_evidence_chars,
+            force=force,
+            json_output=json_output,
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+@_ai_app.command("status")
+def ai_status() -> None:
+    """Show AI provider configuration, limits and cached artifacts."""
+    settings = get_settings()
+    _run(_ai_status_run(settings))
+
+
+async def _ai_status_run(settings: Settings) -> None:
+    engine, session = await _engine_and_session(settings)
+    try:
+        try:
+            base_url = settings.require_ai_config()[0]
+            configured = True
+        except SettingsError:
+            base_url, configured = "", False
+        stats = await SqlArtifactStore(session).stats()
+        rows: list[list[object]] = [
+            ["provider configured", "yes" if configured else "no"],
+            ["model", settings.ai_model or "—"],
+            ["base URL host", _url_host(base_url) if configured else "—"],
+            ["per-run request cap", settings.ai_max_requests_per_run],
+            ["max output tokens", settings.ai_max_output_tokens],
+            ["max evidence chars", settings.ai_max_evidence_chars],
+        ]
+        total = sum(stats.values())
+        rows.append(["cached artifacts", total])
+        for artifact_type, count in sorted(stats.items()):
+            rows.append([f"  {artifact_type}", count])
+        _print_table(["Setting", "Value"], rows)
+
+        _print_table(
+            ["Artifact", "Prompt version"],
+            [[name, version] for name, version in sorted(PROMPT_VERSIONS.items())],
+        )
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+def _url_host(base_url: str) -> str:
+    from urllib.parse import urlparse
+
+    return urlparse(base_url).netloc or base_url
 
 def main() -> None:
     logging.basicConfig(

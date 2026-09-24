@@ -28,6 +28,15 @@ PHASE4_COMMANDS = [
     "related-topics",
     "related-repos",
 ]
+PHASE5_COMMANDS = [
+    "ai",
+    "ai__repo",
+    "ai__topic",
+    "ai__developer",
+    "ai__ecosystem",
+    "ai__bridge",
+    "ai__status",
+]
 
 
 def _invoke(command: str) -> Result:
@@ -36,7 +45,11 @@ def _invoke(command: str) -> Result:
 
 def test_all_commands_available() -> None:
     for command in (
-        PHASE1_COMMANDS + PHASE2_COMMANDS + PHASE3_COMMANDS + PHASE4_COMMANDS
+        PHASE1_COMMANDS
+        + PHASE2_COMMANDS
+        + PHASE3_COMMANDS
+        + PHASE4_COMMANDS
+        + PHASE5_COMMANDS
     ):
         result = _invoke(command)
         assert result.exit_code == 0, (
@@ -143,3 +156,25 @@ def test_related_commands_help_mentions_graph_footprint() -> None:
     repos = runner.invoke(app, ["related-repos", "--help"])
     assert repos.exit_code == 0
     assert "graph footprint" in repos.output
+
+
+def test_ai_group_help_lists_subcommands() -> None:
+    result = runner.invoke(app, ["ai", "--help"])
+    assert result.exit_code == 0
+    for subcommand in ("repo", "topic", "developer", "ecosystem", "bridge", "status"):
+        assert subcommand in result.output
+
+
+def test_ai_repo_help_renders_filter_options() -> None:
+    result = runner.invoke(app, ["ai", "repo", "--help"])
+    assert result.exit_code == 0
+    assert "--window" in result.output
+    assert "--trend" in result.output
+    assert "--json" in result.output
+    assert "--force" in result.output
+
+
+def test_ai_status_help_renders() -> None:
+    result = runner.invoke(app, ["ai", "status", "--help"])
+    assert result.exit_code == 0
+    assert "provider" in result.output.lower()

@@ -2,6 +2,7 @@
 
 from github_radar.storage.db import make_engine, make_session_factory, ping
 from github_radar.storage.models import (
+    AIArtifactRow,
     Base,
     ContributorRow,
     DeveloperRow,
@@ -13,6 +14,7 @@ from github_radar.storage.models import (
 from github_radar.storage.repositories import DatasetStats, normalize_topic
 
 __all__ = [
+    "AIArtifactRow",
     "Base",
     "ContributorRow",
     "DatasetStats",

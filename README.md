@@ -19,7 +19,11 @@ and topic edges. It adds overlap and reach metrics, degree/weighted-degree
 centrality, connected components, bridge intelligence (developers and
 repositories connecting separate topic ecosystems) and graph reports — exposed
 through `ecosystem`, `bridges`, `related-topics` and `related-repos` and the
-graph sections of `developer` and `topic` (see `docs/GRAPH.md`).
+graph sections of `developer` and `topic` (see `docs/GRAPH.md`). **Phase 5**
+adds an **AI narration layer**: cached, deterministic-confidence LLM summaries
+of the measured facts for a repository, topic, developer, ecosystem or bridge
+pair — the model only explains the allowlisted evidence, it never measures
+(see `docs/AI.md`).
 
 > github-radar is **not** a GitHub Trending scraper. It only ever talks to the
 > official GitHub REST API. The real long-term asset is its own historical
@@ -43,8 +47,9 @@ graph sections of `developer` and `topic` (see `docs/GRAPH.md`).
 
 ## What Phase 1 does NOT do
 
-- No web UI, FastAPI, GraphQL, LLM summaries, embeddings/pgvector, or AI topic
-  taxonomy.
+- No web UI, FastAPI, GraphQL, embeddings/pgvector, or AI topic taxonomy
+  (LLM narration arrives later, in Phase 5; it never measures — see
+  `docs/AI.md`).
 - No GitHub OAuth / GitHub App / multi-user auth.
 - No outreach, CRM, notifications, or email sending.
 - No crawling of all of GitHub — discovery is query/topic based on purpose.
@@ -122,6 +127,30 @@ graph sections of `developer` and `topic` (see `docs/GRAPH.md`).
   are reproducible between runs and never consult the wall clock (the
   reference instant is the newest real observation).
 
+## What Phase 5 adds
+
+- **LLM narration of measured facts** — `ai repo OWNER/REPO`, `ai topic`,
+  `ai developer`, `ai ecosystem`, `ai bridge A B` turn the deterministic
+  Phase 2–4 analytics into short, grounded narratives. The model is an
+  *explainer*: prompts forbid it from measuring, counting, scoring or ranking,
+  and every asserted key point must reference the evidence ids it was given.
+- **Allowlisted, fingerprint-addressable evidence** — each artifact is built
+  from a canonical evidence bundle (`E1..En` stable ids + sha256 fingerprint)
+  that changes only when the underlying measured facts change.
+- **Model-result cache** — synthesized artifacts are stored in `ai_artifacts`
+  and keyed by (entity, artifact type, window, evidence fingerprint, prompt
+  version, model). Re-running with unchanged evidence is a cache hit (zero
+  spend); `--force` bypasses it. Stale evidence is never served as current.
+- **Deterministic confidence** — every artifact's `LOW` / `MEDIUM` / `HIGH`
+  comes from the Phase 2–4 data-coverage confidence, never from a model
+  self-assessment.
+- **Bounded spend** — `AI_MAX_REQUESTS_PER_RUN` caps model calls per command;
+  exactly one bounded repair attempt; retries only for `429`/`5xx`/network;
+  provider failures are never persisted.
+- **Safety by construction** — untrusted README/release/commit text is wrapped
+  in `<untrusted-data>...</untrusted-data>`, developer evidence excludes every
+  contact/PII field, and configured credentials are redacted from payloads.
+
 ## Requirements
 
 - Python 3.12+ (managed via `uv`)
@@ -183,6 +212,14 @@ root — see `.env.example` for every option):
 | `DISCOVER_MAX_LIMIT` | hard cap for `--limit` | `500` |
 | `CONTRIBUTORS_LIMIT_PER_REPO` | contributor rows kept per repo | `30` |
 | `PROFILE_REFRESH_DAYS` | refresh developer profiles older than this | `7` |
+| `AI_API_KEY` | Bearer token for the AI chat endpoint (required for `ai *`) | — |
+| `AI_BASE_URL` | chat endpoint base (OpenAI-compatible) | — |
+| `AI_MODEL` | model id (part of the AI cache key) | — |
+| `AI_TIMEOUT_SECONDS` | AI request timeout | `60` |
+| `AI_MAX_OUTPUT_TOKENS` | `max_tokens` in AI requests | `2048` |
+| `AI_TEMPERATURE` | AI sampling temperature | `0.2` |
+| `AI_MAX_REQUESTS_PER_RUN` | AI model-call cap per command | `20` |
+| `AI_MAX_EVIDENCE_CHARS` | cap on evidence rendered per AI prompt | `12000` |
 | `LOG_LEVEL` | root log level | `INFO` |
 
 Never commit `.env`.
@@ -222,12 +259,19 @@ uv run github-radar discover --help
 | `github-radar bridges repos` | repositories ranked as cross-ecosystem bridges |
 | `github-radar related-topics mcp` | a topic's graph footprint and related topics |
 | `github-radar related-repos owner/repository` | a repository's graph footprint and related repositories |
+| `github-radar ai repo owner/repository` | LLM narrative of one tracked repository (cached) |
+| `github-radar ai topic mcp` | LLM narrative of one tracked topic |
+| `github-radar ai developer adalovelace` | LLM narrative of one tracked developer |
+| `github-radar ai ecosystem` | LLM narrative of the whole tracked ecosystem |
+| `github-radar ai bridge mcp browser-agents` | LLM narrative of a two-topic bridge ecosystem |
+| `github-radar ai status` | AI provider configuration, limits and cached artifacts |
 | `github-radar rate-limit` | current GitHub API quota |
 
 See `docs/TRENDING.md` for the exact formulas behind the Phase 2 commands,
 `docs/DEVELOPERS.md` for the developer-intelligence formulas behind the Phase 3
-commands, and `docs/GRAPH.md` for the Phase 4 graph model, metrics, bridges and
-commands.
+commands, `docs/GRAPH.md` for the Phase 4 graph model, metrics, bridges and
+commands, and `docs/AI.md` for how the Phase 5 LLM narration layer works —
+evidence allowlist, caching, confidence, provider contract and spend bounds.
 
 ### Example discovery
 
@@ -303,6 +347,9 @@ uv run mypy .
 - `docs/GRAPH.md` — the Phase 4 ecosystem graph: model, overlap/reach/centrality
   metrics, connected components, bridges, reports, and the `ecosystem` /
   `bridges` / `related-topics` / `related-repos` CLI.
+- `docs/AI.md` — the Phase 5 AI narration layer: evidence allowlist, caching
+  and invalidation, deterministic confidence, provider contract, spend bounds,
+  and the `ai` CLI.
 
 ## License
 

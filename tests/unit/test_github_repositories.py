@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import date
 
 import httpx
 
 from github_radar.github.client import GitHubClient
 from github_radar.github.repositories import (
+    get_commits,
     get_contributors,
+    get_readme,
+    get_releases,
     get_repository,
     search_repositories,
 )
@@ -87,3 +91,67 @@ async def test_get_user_profile(settings, api_mock) -> None:
     assert profile.login == "octo"
     assert profile.followers == 1000
     assert profile.public_email == "octo@example.com"
+
+
+async def test_get_readme_decodes_base64_body(settings, api_mock) -> None:
+    api_mock.get(f"{BASE_URL}/repos/octo/repo/readme").mock(
+        return_value=httpx.Response(
+            200,
+            json={"content": base64.b64encode(b"# hello\nworld\n").decode("ascii")},
+        )
+    )
+    async with GitHubClient(settings) as client:
+        readme = await get_readme(client, "octo", "repo")
+    assert readme == "# hello\nworld\n"
+
+
+async def test_get_readme_missing_returns_empty_string(settings, api_mock) -> None:
+    api_mock.get(f"{BASE_URL}/repos/octo/repo/readme").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    async with GitHubClient(settings) as client:
+        readme = await get_readme(client, "octo", "repo")
+    assert readme == ""
+
+
+async def test_get_releases_shapes_metadata(settings, api_mock) -> None:
+    api_mock.get(f"{BASE_URL}/repos/octo/repo/releases").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "tag_name": "v1.1.0",
+                    "name": "v1.1.0",
+                    "published_at": "2024-05-01T00:00:00Z",
+                    "body": "Release notes here",
+                }
+            ],
+        )
+    )
+    async with GitHubClient(settings) as client:
+        releases = await get_releases(client, "octo", "repo", limit=5)
+    assert releases[0]["tag_name"] == "v1.1.0"
+    assert releases[0]["body"] == "Release notes here"
+    assert len(releases) == 1
+
+
+async def test_get_commits_shapes_messages(settings, api_mock) -> None:
+    api_mock.get(f"{BASE_URL}/repos/octo/repo/commits").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "sha": "0123456789abcdef0123456789abcdef01234567",
+                    "commit": {
+                        "author": {"date": "2024-05-02T01:00:00Z"},
+                        "message": "  Fix the widget  ",
+                    },
+                }
+            ],
+        )
+    )
+    async with GitHubClient(settings) as client:
+        commits = await get_commits(client, "octo", "repo", limit=20)
+    assert commits[0]["sha"] == "0123456789ab"
+    assert commits[0]["message"] == "Fix the widget"
+    assert commits[0]["date"] == "2024-05-02T01:00:00Z"

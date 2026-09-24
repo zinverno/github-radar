@@ -9,6 +9,7 @@ the Alembic offline SQL render.
 from __future__ import annotations
 
 from github_radar.storage.models import (
+    AIArtifactRow,
     Base,
     ContributorRow,
     DeveloperRow,
@@ -25,6 +26,7 @@ EXPECTED_TABLES = {
     "repository_topics",
     "repository_contributors",
     "repository_snapshots",
+    "ai_artifacts",
 }
 
 
@@ -117,3 +119,27 @@ def test_row_classes_have_no_extra_surprise_columns() -> None:
     assert RepositoryTopicRow.__tablename__ == "repository_topics"
     assert ContributorRow.__tablename__ == "repository_contributors"
     assert SnapshotRow.__tablename__ == "repository_snapshots"
+    assert AIArtifactRow.__tablename__ == "ai_artifacts"
+
+
+def test_ai_artifact_cache_key_is_unique() -> None:
+    t = table("ai_artifacts")
+    named = {str(c.name): c for c in t.constraints if c.name}
+    constraint = named["uq_ai_artifacts_cache_key"]
+    columns = [col.name for col in constraint.columns]
+    assert columns == [
+        "entity_type",
+        "entity_key",
+        "artifact_type",
+        "window_days",
+        "source_fingerprint",
+        "prompt_version",
+        "model",
+    ]
+
+
+def test_ai_artifacts_entity_and_type_indexed() -> None:
+    t = table("ai_artifacts")
+    indexes = {i.name: i for i in t.indexes}
+    assert "ix_ai_artifacts_entity" in indexes
+    assert "ix_ai_artifacts_artifact_type" in indexes

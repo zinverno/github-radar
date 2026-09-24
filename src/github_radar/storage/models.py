@@ -260,7 +260,52 @@ class SnapshotRow(Base):
         )
 
 
+class AIArtifactRow(Base):
+    """A persisted AI synthesis artifact (the Phase 5 model-result cache).
+
+    One row per (entity, artifact type, window, evidence fingerprint, prompt
+    version, model) — see the ``uq_ai_artifacts_cache_key`` constraint. The
+    fingerprint makes the cache key *data-sensitive*: as soon as the relevant
+    evidence changes the key changes, so an old summary can never masquerade
+    as current. ``result_json``/``evidence_json`` are immutable snapshot blobs.
+    """
+
+    __tablename__ = "ai_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_type",
+            "entity_key",
+            "artifact_type",
+            "window_days",
+            "source_fingerprint",
+            "prompt_version",
+            "model",
+            name="uq_ai_artifacts_cache_key",
+        ),
+        Index("ix_ai_artifacts_entity", "entity_type", "entity_key"),
+        Index("ix_ai_artifacts_artifact_type", "artifact_type"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_key: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_type: Mapped[str] = mapped_column(Text, nullable=False)
+    window_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+
+
 __all__ = [
+    "AIArtifactRow",
     "Base",
     "ContributorRow",
     "ContributorSnapshotRow",

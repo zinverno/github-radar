@@ -6,7 +6,9 @@ decisions (and their trade-offs). Phase 1 = data foundation + CLI; Phase 2 =
 deterministic analytics (time-series, momentum, trends, topics, confidence)
 built purely on the snapshot history; Phase 3 = developer intelligence built on
 observation deltas; Phase 4 = a derived ecosystem graph (developers,
-repositories, topics) built purely on the stored relational dataset.
+repositories, topics) built purely on the stored relational dataset; Phase 5 =
+a cached, deterministic-confidence AI narration layer that explains measured
+facts without measuring anything itself.
 
 ## Overview
 
@@ -67,8 +69,19 @@ never writes back, so it can always be re-derived from freshly stored data.
 | `graph/metrics.py` | Reach, degree/weighted-degree centrality, connected components |
 | `graph/bridges.py` | Developer / cross-topic / repository bridge intelligence |
 | `graph/reports.py` | Deterministic report projections used by the CLI |
+| `ai/models.py` | Evidence bundle + stable ids, fingerprint, structured output schema (`LLMSummary`), persisted `AIArtifact`, `ArtifactKey` |
+| `ai/evidence.py` | Deterministic evidence builders per artifact type (pure; allowlist only) |
+| `ai/safety.py` | Payload normalization, untrusted-data wrapping, secret redaction |
+| `ai/confidence.py` | Deterministic artifact confidence (`LOW`/`MEDIUM`/`HIGH`) |
+| `ai/prompts.py` | Versioned system/user prompts + `PROMPT_VERSIONS` |
+| `ai/provider.py` | `AIProvider` protocol + generic `ProviderResult[T]` |
+| `ai/openai_compatible.py` | httpx OpenAI-compatible provider (retry/repair/tokens) |
+| `ai/textual.py` | Bounded TTL-cached README/release/commit text evidence |
+| `ai/service.py` | Synthesis orchestration: cache-first, budget, fail-safe persist |
+| `ai/cache.py` | `ArtifactStore` protocol + `SqlArtifactStore` + `MemoryArtifactStore` |
+| `storage/ai_artifacts.py` | `get_artifact` / `save_artifact` / `artifact_stats` over `ai_artifacts` |
 | `cli/app.py` | Typer CLI |
-| `migrations/` | Alembic migrations (hand-written `0001_initial`) |
+| `migrations/` | Alembic migrations (hand-written `0001_initial` … `0004_ai_artifact_cache`) |
 
 ## Canonical domain model
 
@@ -148,6 +161,16 @@ for every observed contributor link. The delta between two snapshots of the
 same link is the *observed* activity signal for a window; a single snapshot is
 never recent activity.
 
+### `ai_artifacts`  (Phase 5 model-result cache)
+`id` (PK), `entity_type`, `entity_key`, `artifact_type`, `window_days`,
+`source_fingerprint`, `prompt_version`, `provider`, `model`, `generated_at`,
+`result_json`, `evidence_json`, `input_tokens`, `output_tokens`. Unique
+constraint `uq_ai_artifacts_cache_key` on
+`(entity_type, entity_key, artifact_type, window_days, source_fingerprint,
+prompt_version, model)`; indexes on `(entity_type, entity_key)` and
+`(artifact_type)`. One row per *versioned, fingerprint-addressed* artifact;
+evidence changes → new fingerprint → new row (old rows are never deleted).
+
 ## Data flow
 
 ### Discovery (`discover` command → `RepositoryDiscoveryService.discover`)
@@ -216,6 +239,9 @@ Phase 2 only makes *periodic* observation possible — a future scheduler calls
 | `GET /search/repositories` | `search` | discovery search, paginated |
 | `GET /repos/{owner}/{repo}` | `core` | full metadata + topics |
 | `GET /repos/{owner}/{repo}/contributors` | `core` | cumulative contributor counts |
+| `GET /repos/{owner}/{repo}/readme` | `core` | README text for AI evidence (Phase 5, TTL-cached) |
+| `GET /repos/{owner}/{repo}/releases` | `core` | latest release notes for AI evidence (Phase 5) |
+| `GET /repos/{owner}/{repo}/commits` | `core` | latest commit messages for AI evidence (Phase 5) |
 | `GET /users/{login}` | `core` | public developer profile |
 | `GET /rate_limit` | `core` | quota snapshot for the `rate-limit` command |
 
@@ -394,12 +420,56 @@ integration suite.
 
 See `docs/GRAPH.md` for the full model, formulas and command reference.
 
+### AI narration layer (Phase 5)
+
+The `ai` command group uses a chat-completions LLM purely as an **explainer**:
+the model restates, explains and synthesizes allowlisted evidence from Phases
+2–4; it never measures, counts, scores, ranks or declares universal truths
+about GitHub. The prompt contract states this explicitly, and every asserted
+key point must reference the evidence ids it was given so output is traceable.
+
+Pipeline per artifact: CLI assembles the analytic digest → `ai/evidence.py`
+builds an `EvidenceBundle` (stable `E1..En` ids assigned in a canonical
+content order, + sha256 fingerprint) → `ai/service.py` looks up the artifact
+by `ArtifactKey` (entity, artifact type, window, fingerprint, prompt version,
+model) in `ai_artifacts` → on a miss it builds the versioned prompt, calls
+`provider.generate_structured(LLMSummary)`, and persists a validated
+`AIArtifact` plus a JSON snapshot of the evidence. A cache hit replays the
+stored artifact with zero model spend; `--force` bypasses the lookup.
+
+Safety properties are structural, not aspirational:
+
+- **Allowlist only** — evidence builders render explicit fields; developer
+  evidence excludes every contact/PII field by construction.
+- **Untrusted text is data** — README/release/commit text is normalized,
+  truncated and wrapped in `<untrusted-data>…</untrusted-data>` so third-party
+  content can't smuggle instructions; configured secrets are redacted from
+  rendered payloads (defence-in-depth).
+- **Deterministic confidence** — an artifact's `LOW`/`MEDIUM`/`HIGH` is derived
+  from the Phase 2–4 data-coverage confidence (`ai/confidence.py`), never from
+  the model.
+- **Bounded provider contract** — exactly one repair attempt on invalid JSON;
+  retries only for `429` (honouring `Retry-After`, capped) / `5xx` / transport;
+  `4xx` fail fast; token usage stored only when reported. Failures are never
+  persisted, so `--force` after a failure leaves the previous artifact intact.
+- **Bounded spend** — `AI_MAX_REQUESTS_PER_RUN` caps model calls per command;
+  textual evidence is TTL-cached and size-capped (README ≤ 9000 chars, 5
+  releases × 2000, 20 commits × 400) with `github_evidence_requests` /
+  `evidence_cache_hits` / `evidence_cache_misses` counters in `ai/textual.py`.
+
+Circular-import constraint: `ArtifactKey` lives in `ai/models.py` and
+`storage/ai_artifacts.py` imports it from there, so storage never imports the
+service/cache layer. See `docs/AI.md` for the full contract and CLI reference.
+
 ## Config knobs
 
 See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
 `DATABASE_URL`, `GITHUB_API_BASE_URL`, `HTTP_TIMEOUT_SECONDS`,
 `HTTP_MAX_RETRIES`, `RATE_LIMIT_PAUSE_THRESHOLD`, `CONTRIBUTORS_LIMIT_PER_REPO`,
-`PROFILE_REFRESH_DAYS`, `DISCOVER_DEFAULT_LIMIT`, `DISCOVER_MAX_LIMIT`.
+`PROFILE_REFRESH_DAYS`, `DISCOVER_DEFAULT_LIMIT`, `DISCOVER_MAX_LIMIT`, and the
+Phase 5 `AI_*` set (`AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`,
+`AI_TIMEOUT_SECONDS`, `AI_MAX_OUTPUT_TOKENS`, `AI_TEMPERATURE`,
+`AI_MAX_REQUESTS_PER_RUN`, `AI_MAX_EVIDENCE_CHARS`).
 
 ## Known limitations (deliberate)
 
@@ -444,9 +514,10 @@ See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,
 - Topic-based growth analytics already join `repository_topics` →
   `repository_snapshots` via `_collect_tracked` in the CLI; a richer topic
   model can reuse `aggregate_topics` / `TopicConfidenceRule`.
-- The momentum function is designed to be replaced by richer models
-  (e.g. time-series or LLM-assisted summaries) — analytics stay purely
-  functions of snapshots, so downstream models don't touch storage.
+- The momentum function is designed to be replaced by richer models —
+  analytics stay purely functions of snapshots, so downstream models
+  (including the Phase 5 AI layer, which consumes those analytics through
+  `ai/evidence.py`) don't touch storage.
 - `DeveloperIntelligenceService.load_dataset` produces the entire
   analytics-ready dataset in one shot; a future web/API frontend can hand
   richer models the same `DeveloperDataset` without repeating the storage
