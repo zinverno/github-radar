@@ -2729,6 +2729,63 @@ def _url_host(base_url: str) -> str:
 
     return urlparse(base_url).netloc or base_url
 
+
+@app.command("serve")
+def serve_command(
+    host: str = typer.Option(
+        "127.0.0.1", "--host", help="Interface to bind (default: loopback only)."
+    ),
+    port: int = typer.Option(
+        8000, "--port", "-p", help="Port to listen on."
+    ),
+    reload: bool = typer.Option(
+        False, "--reload", help="Unsupported here; use uvicorn directly."
+    ),
+) -> None:
+    """Run the web API (and the SPA when ``web/dist`` is built).
+
+    The app mounts the API under ``/api/v1`` (docs at ``/api/v1/docs``). When
+    the React frontend has been built it is served with history-fallback; an
+    unbuilt frontend gets a day-0 placeholder page. Reload-based development is
+    not needed because the API is stateless over static analytics: run
+    ``uvicorn github_radar.api.app:create_app --factory --reload`` if you want it.
+    """
+    settings = get_settings()
+    try:
+        settings.require_database_url()
+    except SettingsError as exc:
+        typer.secho(
+            f"Configuration error: {exc}\n  Configure the missing value in your "
+            ".env file (see .env.example).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if reload:
+        typer.secho(
+            "--reload is handled by uvicorn, not this command. Run:\n"
+            "  uvicorn github_radar.api.app:create_app --factory --reload",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    import uvicorn
+
+    typer.secho(
+        f"Serving github-radar API on http://{host}:{port}/api/v1 "
+        f"(docs at /api/v1/docs).",
+        fg=typer.colors.GREEN,
+    )
+    uvicorn.run(
+        "github_radar.api.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        log_level=settings.log_level.lower(),
+    )
+
+
 def main() -> None:
     logging.basicConfig(
         level=get_settings().log_level.upper(),

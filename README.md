@@ -23,7 +23,12 @@ graph sections of `developer` and `topic` (see `docs/GRAPH.md`). **Phase 5**
 adds an **AI narration layer**: cached, deterministic-confidence LLM summaries
 of the measured facts for a repository, topic, developer, ecosystem or bridge
 pair — the model only explains the allowlisted evidence, it never measures
-(see `docs/AI.md`).
+(see `docs/AI.md`). **Phase 6** puts that intelligence behind a real
+interface: a versioned **FastAPI REST API** under `/api/v1` (typed JSON
+envelopes, validation, pagination, a uniform error contract) and a **React +
+TypeScript single-page web app** that consumes it — trend pages, detail
+drill-downs, the ecosystem graph and the AI narration console (see
+`docs/WEB.md`).
 
 > github-radar is **not** a GitHub Trending scraper. It only ever talks to the
 > official GitHub REST API. The real long-term asset is its own historical
@@ -49,7 +54,7 @@ pair — the model only explains the allowlisted evidence, it never measures
 
 - No web UI, FastAPI, GraphQL, embeddings/pgvector, or AI topic taxonomy
   (LLM narration arrives later, in Phase 5; it never measures — see
-  `docs/AI.md`).
+  `docs/AI.md`. The web UI and REST API arrive in Phase 6.)
 - No GitHub OAuth / GitHub App / multi-user auth.
 - No outreach, CRM, notifications, or email sending.
 - No crawling of all of GitHub — discovery is query/topic based on purpose.
@@ -151,10 +156,35 @@ pair — the model only explains the allowlisted evidence, it never measures
   in `<untrusted-data>...</untrusted-data>`, developer evidence excludes every
   contact/PII field, and configured credentials are redacted from payloads.
 
+## What Phase 6 adds
+
+- **Versioned REST API** — `github-radar serve` exposes every piece of Phase
+  2–5 intelligence under `/api/v1` (OpenAPI at `/api/v1/openapi.json`,
+  an interactive console at `/api/v1/docs`): repositories, topics,
+  developers, ecosystem report/nodes/edges, bridges, search, explore, status
+  and the AI endpoints.
+- **Typed JSON contract** — every `GET` returns a `{items/limit/offset/total}`
+  envelope (where paged) with `null` meaning "unavailable" (never zero), and
+  every failure returns a uniform `{"error": {"code", "message", "details"}}`
+  envelope — the frontend renders errors, never raw stack traces.
+- **Consistent validation** — windows are exactly `1d|7d|30d`, pagination is
+  capped (`limit ≤ 100`), entity ids are validated, and bad input fails as
+  `422 validation_error` before any work happens.
+- **React + TypeScript SPA** — a dark, keyboard-focusable single-page app in
+  `web/`: list + detail pages for repositories, topics and developers,
+  an interactive three-type ecosystem graph, a bridges explorer, an explore/
+  search home page and an AI console (status, cache, cached artifacts and a
+  one-click generate with stale-evidence invalidation).
+- **Served by the API process** — the built SPA is served directly by
+  FastAPI from `web/dist` with a single-page fallback, so a single
+  `github-radar serve` process is the whole UI+API. A Vite dev server (with
+  `/api` proxying) is used during development.
+
 ## Requirements
 
 - Python 3.12+ (managed via `uv`)
 - PostgreSQL 13+ (any recent version works)
+- Node.js 20+ (only needed to build/test the Phase 6 web app)
 - A GitHub token: create a classic token with `public_repo` scope, or a
   fine-grained token with *Public repositories → Metadata: Read*.
 
@@ -265,6 +295,7 @@ uv run github-radar discover --help
 | `github-radar ai ecosystem` | LLM narrative of the whole tracked ecosystem |
 | `github-radar ai bridge mcp browser-agents` | LLM narrative of a two-topic bridge ecosystem |
 | `github-radar ai status` | AI provider configuration, limits and cached artifacts |
+| `github-radar serve` | FastAPI + built SPA on one port (API under `/api/v1`) |
 | `github-radar rate-limit` | current GitHub API quota |
 
 See `docs/TRENDING.md` for the exact formulas behind the Phase 2 commands,
@@ -285,6 +316,33 @@ uv run github-radar stats
 Running `discover`/`update` again later does **not** overwrite history: it
 appends new snapshots whenever counters changed, so growth can be measured over
 time.
+
+## Web UI (Phase 6)
+
+### Run it
+
+```bash
+cd web && npm install && npm run build     # build the SPA into web/dist
+cd .. && uv run github-radar serve         # http://127.0.0.1:8000
+```
+
+One process serves everything: the SPA at `/`, the API at `/api/v1` and the
+interactive API console at `/api/v1/docs`. The app reads `DATABASE_URL` from
+`.env` like every other command.
+
+### Develop it
+
+```bash
+cd web
+npm run dev        # Vite dev server on :5173, proxies /api to 127.0.0.1:8000
+npm run lint       # eslint (flat config)
+npm run typecheck  # tsc --noEmit
+npm run test       # vitest (unit tests, jsdom)
+npm run build      # production build into web/dist
+```
+
+A separate `github-radar serve` process must be running for the dev server to
+proxy API calls to.
 
 ## Snapshot policy
 
@@ -350,6 +408,8 @@ uv run mypy .
 - `docs/AI.md` — the Phase 5 AI narration layer: evidence allowlist, caching
   and invalidation, deterministic confidence, provider contract, spend bounds,
   and the `ai` CLI.
+- `docs/WEB.md` — the Phase 6 web layer: the `/api/v1` REST contract, the
+  React SPA structure, error/validation conventions, and development workflow.
 
 ## License
 

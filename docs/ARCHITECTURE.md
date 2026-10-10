@@ -461,6 +461,40 @@ Circular-import constraint: `ArtifactKey` lives in `ai/models.py` and
 `storage/ai_artifacts.py` imports it from there, so storage never imports the
 service/cache layer. See `docs/AI.md` for the full contract and CLI reference.
 
+### Web API and SPA (Phase 6)
+
+The Phase 6 web layer adds two things on top of the Phase 2–5 analytics:
+
+- **`github_radar.api`** — a FastAPI application (`api/app.py`) that mounts a
+  versioned router at `/api/v1`. Each analytics family has its own router
+  module under `api/routes/` (`repositories.py`, `topics.py`, `developers.py`,
+  `ecosystem.py`, `bridges.py`, `search.py`, `ai.py`, `status.py`) plus shared
+  `errors.py`, `pagination.py`, `validation.py` and `serializers.py`. The
+  routers reuse the Phase 2–5 services in `analytics/` and `graph/` directly —
+  there is no duplicate analytics implementation.
+- **A uniform JSON contract.** Paged responses are `{items, limit, offset,
+  total, has_more}` envelopes; `null` in Python serializers means
+  "unavailable", never zero. Failures always use
+  `{"error": {"code", "message", "details": {}}}`. Windows are exactly
+  `1d|7d|30d` (validated by OpenAPI pattern, so bad windows fail as
+  `422 validation_error` before any work), pagination is capped at
+  `limit ≤ 100`, and unknown API paths return a JSON 404.
+- **SPA hosting.** `create_app` serves the built static bundle from
+  `web/dist` (resolved as `.../web/dist` next to the source tree) with a
+  single-page fallback: unknown non-asset, non-`/api` paths return
+  `index.html`, deep links render correctly in the React Router app, and the
+  day-0 placeholder explains how to build the frontend.
+- **Entitlements** — `create_app(settings=None, *, engine=..., session_factory=...,
+  web_dist=...)` lets tests slot in a sqlite-backed session factory; the
+  `serve` CLI command wires the real engine from `DATABASE_URL`.
+
+The SPA itself (`web/`) is a Vite + React 18 + TypeScript app using
+`react-router-dom` for routing, plain CSS for the dark theme, a tiny
+`lib/api.ts` fetch wrapper that unwraps/rejects on the error envelope, and
+an `EcoGraph` component that renders the `DEVELOPER`/`REPOSITORY`/`TOPIC`
+graph from `/api/v1/ecosystem/nodes` + `/api/v1/ecosystem/edges`. See
+`docs/WEB.md` for the endpoint table, page map, and development workflow.
+
 ## Config knobs
 
 See `README.md` for the full table. Key switches: `GITHUB_TOKEN`,

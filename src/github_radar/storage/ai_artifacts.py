@@ -103,6 +103,30 @@ async def artifact_stats(session: AsyncSession) -> dict[str, int]:
     return {name: count for name, count in rows}
 
 
+async def list_artifacts(
+    session: AsyncSession,
+    *,
+    entity_type: str | None = None,
+    entity_key: str | None = None,
+    artifact_type: str | None = None,
+    window_days: int | None = None,
+    limit: int = 50,
+) -> list[AIArtifactRow]:
+    """Most-recently-generated artifact rows matching the optional filters."""
+    query = select(AIArtifactRow)
+    if entity_type is not None:
+        query = query.where(AIArtifactRow.entity_type == entity_type)
+    if entity_key is not None:
+        query = query.where(AIArtifactRow.entity_key == entity_key)
+    if artifact_type is not None:
+        query = query.where(AIArtifactRow.artifact_type == artifact_type)
+    if window_days is not None:
+        query = query.where(AIArtifactRow.window_days == window_days)
+    query = query.order_by(AIArtifactRow.generated_at.desc()).limit(limit)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
 def serialize_evidence(bundle: EvidenceBundle) -> str:
     """Stable JSON snapshot of an evidence bundle for storage/display.
 
@@ -140,6 +164,7 @@ __all__ = [
     "StoredArtifact",
     "artifact_stats",
     "get_artifact",
+    "list_artifacts",
     "save_artifact",
     "serialize_evidence",
 ]

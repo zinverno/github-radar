@@ -28,3 +28,5 @@ coverage.xml
 
 # Logs
 *.log
+/web/node_modules/
+/web/dist/

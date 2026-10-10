@@ -858,6 +858,37 @@ async def topics_for_repository(
     return result.scalars().all()
 
 
+async def topics_with_repository_counts(
+    session: AsyncSession,
+) -> list[tuple[str, int]]:
+    """Every observed topic with its repository count, by count descending."""
+    result = await session.execute(
+        select(TopicRow.name, func.count(RepositoryTopicRow.repository_id).label("c"))
+        .outerjoin(
+            RepositoryTopicRow, RepositoryTopicRow.topic_id == TopicRow.id
+        )
+        .group_by(TopicRow.id, TopicRow.name)
+        .order_by(func.count(RepositoryTopicRow.repository_id).desc(), TopicRow.name.asc())
+    )
+    return [(name, count) for name, count in result.all()]
+
+
+async def topic_names_like(
+    session: AsyncSession, fragment: str
+) -> list[tuple[str, int]]:
+    """Topics whose name contains ``fragment``, with repository counts."""
+    result = await session.execute(
+        select(TopicRow.name, func.count(RepositoryTopicRow.repository_id).label("c"))
+        .outerjoin(
+            RepositoryTopicRow, RepositoryTopicRow.topic_id == TopicRow.id
+        )
+        .where(TopicRow.name.contains(fragment))
+        .group_by(TopicRow.id, TopicRow.name)
+        .order_by(func.count(RepositoryTopicRow.repository_id).desc(), TopicRow.name.asc())
+    )
+    return [(name, count) for name, count in result.all()]
+
+
 async def contributors_for_repository(
     session: AsyncSession,
     repository_id: int,
