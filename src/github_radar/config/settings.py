@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from github_radar.util import utcnow
@@ -12,6 +12,18 @@ from github_radar.util import utcnow
 
 class SettingsError(Exception):
     """Raised when the configuration is missing or invalid."""
+
+
+class GitHubRequestLimits(BaseModel):
+    """Hard HTTP-attempt caps shared by planning and the GitHub client."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    total: int = Field(default=100, ge=0)
+    search: int = Field(default=10, ge=0)
+    repository_details: int = Field(default=30, ge=0)
+    contributors: int = Field(default=30, ge=0)
+    profiles: int = Field(default=30, ge=0)
 
 
 class Settings(BaseSettings):
@@ -40,21 +52,23 @@ class Settings(BaseSettings):
     github_api_version: str = "2022-11-28"
 
     # HTTP behaviour.
-    http_timeout_seconds: float = 15.0
+    http_timeout_seconds: float = Field(default=15.0, gt=0, allow_inf_nan=False)
     http_max_retries: int = 3
 
     # Rate-limit strategy. When remaining quota for a resource drops to this
     # value (or below) the client refuses further requests.
     rate_limit_pause_threshold: int = 50
+    search_rate_limit_pause_threshold: int = Field(default=2, ge=0)
+    github_request_budget: GitHubRequestLimits = Field(default_factory=GitHubRequestLimits)
 
     # Discovery caps.
-    discover_default_limit: int = 25
-    discover_max_limit: int = 500
-    contributors_limit_per_repo: int = 30
-    profile_refresh_days: int = 7
+    discover_default_limit: int = Field(default=25, ge=1, le=1000)
+    discover_max_limit: int = Field(default=500, ge=1, le=1000)
+    contributors_limit_per_repo: int = Field(default=30, ge=0, le=1000)
+    profile_refresh_days: int = Field(default=7, ge=0, le=3650)
 
     # Search pagination size (GitHub allows up to 100).
-    search_per_page: int = 100
+    search_per_page: int = Field(default=100, ge=1, le=100)
 
     # LLM provider (OpenAI-compatible chat completions API).
     ai_api_key: str = ""

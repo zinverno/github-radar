@@ -26,6 +26,17 @@ from tests.conftest import (
 )
 
 
+async def test_best_match_omits_sort_parameter(settings, api_mock) -> None:
+    route = api_mock.get(f"{BASE_URL}/search/repositories").mock(
+        return_value=httpx.Response(200, json={"total_count": 0, "items": []})
+    )
+    async with GitHubClient(settings) as client:
+        assert [repo async for repo in search_repositories(
+            client, query="mcp", sort="best-match", limit=1,
+        )] == []
+    assert "sort" not in route.calls.last.request.url.params
+
+
 async def test_search_repositories_builds_qualifiers(
     settings, api_mock
 ) -> None:

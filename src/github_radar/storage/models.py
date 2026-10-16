@@ -92,6 +92,8 @@ class RepositoryRow(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     owner: Mapped[DeveloperRow | None] = relationship(foreign_keys=[owner_id])
+    contributors_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    contributors_fetched_limit: Mapped[int | None] = mapped_column(Integer)
     topics: Mapped[list[TopicRow]] = relationship(
         secondary="repository_topics", back_populates="repositories", lazy="selectin"
     )
@@ -304,7 +306,39 @@ class AIArtifactRow(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
+class CollectionRunRow(Base):
+    __tablename__ = "collection_runs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    report_json: Mapped[str] = mapped_column(Text, nullable=False)
+    requests_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class DiscoveryProvenanceRow(Base):
+    __tablename__ = "discovery_provenance"
+
+    repository_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("repositories.id", ondelete="CASCADE"), primary_key=True
+    )
+    category: Mapped[str] = mapped_column(Text, primary_key=True)
+    recipe: Mapped[str] = mapped_column(Text, primary_key=True)
+    query_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("collection_runs.id"), nullable=False
+    )
+
+
 __all__ = [
+    "CollectionRunRow",
+    "DiscoveryProvenanceRow",
     "AIArtifactRow",
     "Base",
     "ContributorRow",

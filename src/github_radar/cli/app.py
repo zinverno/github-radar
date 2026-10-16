@@ -35,6 +35,8 @@ from typing import Any
 import typer
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from github_radar.ai.cache import SqlArtifactStore
@@ -86,12 +88,24 @@ from github_radar.analytics import (
 )
 from github_radar.analytics.trends import classify_trend
 from github_radar.config import Settings, SettingsError, get_settings
-from github_radar.discovery import DiscoveryReport, RepositoryDiscoveryService
+from github_radar.config.settings import GitHubRequestLimits
+from github_radar.discovery import DiscoveryReport
+from github_radar.discovery.planning import (
+    DiscoveryPlan,
+    ExecutionLimits,
+    PlannedCohort,
+    load_discovery_config,
+    load_reviewed_plan,
+    make_plan,
+    plan_discovery,
+)
 from github_radar.github import (
     GitHubClient,
     GitHubConfigurationError,
     RateLimitExceeded,
 )
+from github_radar.github.budget import RequestBudgetExceeded
+from github_radar.github.repositories import build_search_query
 from github_radar.graph.bridges import (
     DeveloperBridge,
     compute_developer_bridge,
@@ -118,11 +132,13 @@ from github_radar.services import (
     DeveloperDataset,
     DeveloperIntelligenceService,
     DeveloperReport,
-    RepositoryUpdateService,
 )
+from github_radar.services.collection import CollectionService, RunKind, stored_report
 from github_radar.storage import repositories as storage
 from github_radar.storage.ai_artifacts import serialize_evidence
+from github_radar.storage.collection import CollectionLockError, locked_collection_session
 from github_radar.storage.db import make_engine, make_session_factory
+from github_radar.storage.models import CollectionRunRow
 from github_radar.util import utcnow
 
 logger = logging.getLogger(__name__)
@@ -213,6 +229,24 @@ def _run(coro: Any) -> Any:
             err=True,
         )
         raise typer.Exit(code=1)
+    except RequestBudgetExceeded as exc:
+        typer.secho(
+            f"{exc}\n  Attempted requests: {json.dumps(exc.used, sort_keys=True)}\n"
+            "  Run stopped; previously committed data is retained. "
+            "Enrichment may be incomplete.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except ValueError as exc:
+        typer.secho(f"Invalid input: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    except SQLAlchemyError:
+        typer.secho(
+            "Database operation failed. Check connectivity and migrations; "
+            "inspect collection-runs for incomplete work.", fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
     except RateLimitExceeded as exc:
         reset = (
             exc.reset_at.isoformat(timespec="seconds") if exc.reset_at else "unknown"
@@ -264,6 +298,25 @@ def init_db() -> None:
 # discover
 # ---------------------------------------------------------------------------
 
+@app.command("discover-plan")
+def discover_plan(
+    config: Path = typer.Option(PROJECT_ROOT / "config/discovery.toml", "--config"),
+    category: list[str] | None = typer.Option(None, "--category"),
+    recipe: list[str] | None = typer.Option(None, "--recipe"),
+    as_of: str | None = typer.Option(None, "--as-of", help="Reference date (YYYY-MM-DD)."),
+) -> None:
+    """Print a local-only JSON discovery plan; never contact GitHub or a database."""
+    try:
+        plan = plan_discovery(
+            load_discovery_config(config),
+            as_of=date.fromisoformat(as_of) if as_of else utcnow().date(),
+            categories=tuple(category or ()), recipes=tuple(recipe or ()),
+        )
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(plan.model_dump_json(indent=2))
+
+
 @app.command()
 def discover(
     query: str = typer.Argument(..., help="Search query text (e.g. 'mcp')."),
@@ -282,10 +335,11 @@ def discover(
         help="Only repositories created on/after this date (YYYY-MM-DD).",
     ),
     limit: int | None = typer.Option(
-        None, "--limit", help="Maximum repositories to store in this run."
+        None, "--limit", help="Maximum search candidates examined (duplicates included)."
     ),
     contributors_limit: int | None = typer.Option(
-        None, "--contributors-limit", help="Max contributor rows per repository."
+        None, "--contributors-limit", min=0, max=1000,
+        help="Optional enrichment cost preview only; discover never enriches."
     ),
     sort: str | None = typer.Option(
         None,
@@ -295,9 +349,15 @@ def discover(
     order: str | None = typer.Option(
         None, "--order", help="asc or desc."
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print a local plan without network/DB IO."
+    ),
+    max_new_repositories: int = typer.Option(30, "--max-new-repositories", min=0, max=1000),
+    max_seconds: int = typer.Option(120, "--max-seconds", min=1, max=3600),
+    budget: str | None = typer.Option(None, "--budget", help="JSON request-cap overrides."),
 ) -> None:
     """Search GitHub repositories and store what is discovered."""
-    settings = get_settings()
+    settings = _collection_settings(budget)
 
     created: date | None = None
     if created_after:
@@ -321,7 +381,31 @@ def discover(
             err=True,
         )
         raise typer.Exit(code=1)
-    eff_contributors = contributors_limit or settings.contributors_limit_per_repo
+    eff_contributors = (
+        settings.contributors_limit_per_repo if contributors_limit is None else contributors_limit
+    )
+    execution = ExecutionLimits(
+        max_candidates=limit, max_new_repositories=max_new_repositories, max_seconds=max_seconds
+    )
+    if dry_run:
+        try:
+            plan = make_plan(
+                (PlannedCohort.model_validate({
+                    "category": "ad-hoc", "recipe": "custom",
+                    "query": build_search_query(
+                        query=query, language=language, topic=topic,
+                        min_stars=min_stars, created_after=created,
+                    ),
+                    "sort": sort or "stars", "order": order or "desc", "limit": limit,
+                }),),
+                as_of=utcnow().date(), per_page=settings.search_per_page,
+                contributors_limit=eff_contributors, budget=settings.github_request_budget,
+                execution=execution,
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        typer.echo(plan.model_dump_json(indent=2))
+        return
 
     _run(
         _discover_run(
@@ -335,6 +419,7 @@ def discover(
             contributors_limit=eff_contributors,
             sort=sort or "stars",
             order=order or "desc",
+            execution=execution,
         )
     )
 
@@ -351,29 +436,20 @@ async def _discover_run(
     contributors_limit: int,
     sort: str,
     order: str,
+    execution: ExecutionLimits | None = None,
 ) -> None:
-    client = _make_client(settings, require_auth=True)
-    engine, session = await _engine_and_session(settings)
-    try:
-        service = RepositoryDiscoveryService(
-            client,
-            session,
-            contributors_limit=contributors_limit,
-            refresh_days=settings.profile_refresh_days,
-        )
-        report = await service.discover(
-            query=query,
-            language=language,
-            topic=topic,
-            min_stars=min_stars,
-            created_after=created_after,
-            limit=limit,
-            sort=sort,
-            order=order,
-        )
-        _print_report(report)
-    finally:
-        await _housekeeping(client, engine, session)
+    plan = make_plan(
+        (PlannedCohort.model_validate({
+            "category": "ad-hoc", "recipe": "custom",
+            "query": build_search_query(query=query, language=language, topic=topic,
+                                        min_stars=min_stars, created_after=created_after),
+            "sort": sort, "order": order, "limit": limit,
+        }),),
+        as_of=utcnow().date(), per_page=settings.search_per_page,
+        contributors_limit=contributors_limit, budget=settings.github_request_budget,
+        execution=execution,
+    )
+    await _collection_run(settings, "discover", plan=plan)
 
 
 def _print_report(report: DiscoveryReport) -> None:
@@ -400,33 +476,158 @@ def _print_report(report: DiscoveryReport) -> None:
 @app.command()
 def update(
     limit: int | None = typer.Option(
-        None, "--limit", help="Max repositories to refresh."
+        None, "--limit", min=1, max=1000, help="Max repositories to refresh (default 25)."
     ),
+    min_refresh_hours: int = typer.Option(24, "--min-refresh-hours", min=0, max=87600),
+    max_seconds: int = typer.Option(120, "--max-seconds", min=1, max=3600),
+    budget: str | None = typer.Option(None, "--budget", help="JSON request-cap overrides."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """Re-observe tracked repositories and store new snapshots."""
+    """Re-observe due repositories, stale first; store even unchanged observations."""
+    refresh(limit or 25, min_refresh_hours, max_seconds, budget, dry_run)
+
+
+def _collection_settings(budget: str | None) -> Settings:
     settings = get_settings()
-    _run(_update_run(settings, limit=limit))
+    if budget is None:
+        return settings
+    try:
+        overrides = json.loads(budget)
+        if not isinstance(overrides, dict):
+            raise ValueError("Budget must be a JSON object")
+        limits = GitHubRequestLimits.model_validate({
+            **settings.github_request_budget.model_dump(), **overrides,
+        })
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--budget") from exc
+    return settings.model_copy(update={"github_request_budget": limits})
 
 
-async def _update_run(settings: Settings, *, limit: int | None) -> None:
-    client = _make_client(settings, require_auth=True)
+@app.command("discover-execute")
+def discover_execute(
+    plan_file: Path = typer.Argument(..., help="Reviewed JSON from discover-plan."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Execute a reviewed plan as lightweight discovery; no contributor/profile fetches."""
+    try:
+        plan = load_reviewed_plan(plan_file)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if dry_run:
+        typer.echo(plan.model_dump_json(indent=2))
+        return
+    _run(_collection_run(get_settings(), "discover", plan=plan))
+
+
+@app.command()
+def enrich(
+    repositories: list[str] = typer.Argument(..., help="Tracked OWNER/REPO names or GitHub IDs."),
+    max_profiles: int = typer.Option(..., "--max-profiles", min=0, max=1000),
+    contributors_limit: int = typer.Option(10, "--contributors-limit", min=0, max=1000),
+    max_seconds: int = typer.Option(120, "--max-seconds", min=1, max=3600),
+    budget: str | None = typer.Option(None, "--budget", help="JSON request-cap overrides."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Explicit bounded contributor/profile enrichment; reuse fresh stored data."""
+    settings = _collection_settings(budget)
+    if len(repositories) > 25:
+        raise typer.BadParameter("Enrichment accepts at most 25 repository references per run")
+    caps = settings.github_request_budget.model_copy(update={
+        "profiles": min(max_profiles, settings.github_request_budget.profiles),
+    })
+    settings = settings.model_copy(update={"github_request_budget": caps})
+    limits = ExecutionLimits(max_seconds=max_seconds)
+    if dry_run:
+        typer.echo(json.dumps({
+            "mode": "local-only", "operation": "enrich", "repositories": repositories,
+            "contributors_limit": contributors_limit, "fetch_profiles": max_profiles > 0,
+            "budget": caps.model_dump(), "execution": limits.model_dump(),
+        }, indent=2))
+        return
+    _run(_collection_run(
+        settings, "enrich", repositories=tuple(repositories), limits=limits,
+        contributors_limit=contributors_limit, fetch_profiles=max_profiles > 0,
+    ))
+
+
+@app.command()
+def refresh(
+    limit: int = typer.Option(25, "--limit", min=1, max=1000),
+    min_refresh_hours: int = typer.Option(24, "--min-refresh-hours", min=0, max=87600),
+    max_seconds: int = typer.Option(120, "--max-seconds", min=1, max=3600),
+    budget: str | None = typer.Option(None, "--budget", help="JSON request-cap overrides."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Refresh a bounded stale-first selection and record every observation."""
+    settings = _collection_settings(budget)
+    limits = ExecutionLimits(max_repositories=limit, max_seconds=max_seconds)
+    if dry_run:
+        typer.echo(json.dumps({
+            "mode": "local-only", "operation": "refresh", "selection": "oldest observation first",
+            "min_refresh_hours": min_refresh_hours, "execution": limits.model_dump(),
+            "budget": settings.github_request_budget.model_dump(),
+        }, indent=2))
+        return
+    _run(_collection_run(settings, "refresh", limits=limits, min_refresh_hours=min_refresh_hours))
+
+
+async def _collection_run(
+    settings: Settings, kind: RunKind, *, plan: DiscoveryPlan | None = None,
+    limits: ExecutionLimits | None = None, repositories: tuple[str, ...] = (),
+    contributors_limit: int = 30, fetch_profiles: bool = True, min_refresh_hours: int = 24,
+) -> None:
+    settings.require_github_token()
+    engine = make_engine(settings.require_database_url())
+    service: CollectionService | None = None
+    try:
+        async with locked_collection_session(engine) as session:
+            async with _make_client(settings, require_auth=True) as client:
+                service = CollectionService(
+                    client, session, profile_refresh_days=settings.profile_refresh_days
+                )
+                try:
+                    report = await service.run(
+                        kind, plan=plan, limits=limits, repositories=repositories,
+                        contributors_limit=contributors_limit, fetch_profiles=fetch_profiles,
+                        min_refresh_hours=min_refresh_hours,
+                    )
+                except asyncio.CancelledError:
+                    service.report.status = "partial"
+                    service.report.partial = True
+                    service.report.stop_reason = "interrupted"
+                    typer.echo(service.report.model_dump_json(indent=2))
+                    raise
+        typer.echo(report.model_dump_json(indent=2))
+        if report.partial:
+            raise typer.Exit(code=1)
+    except CollectionLockError as exc:
+        run = f" Run {service.report.run_id}; inspect collection-runs." if service else ""
+        typer.secho(f"Collection stopped: {exc}.{run}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        await engine.dispose()
+
+
+@app.command("collection-runs")
+def collection_runs(
+    run_id: str | None = typer.Option(None, "--run-id"),
+    limit: int = typer.Option(20, "--limit", min=1, max=100),
+) -> None:
+    """Read durable collection summaries; unfinished runs are never successful."""
+    _run(_collection_runs_run(get_settings(), run_id=run_id, limit=limit))
+
+
+async def _collection_runs_run(settings: Settings, *, run_id: str | None, limit: int) -> None:
     engine, session = await _engine_and_session(settings)
     try:
-        report = await RepositoryUpdateService(
-            client, session, refresh_days=settings.profile_refresh_days
-        ).update(limit=limit)
-        _print_table(
-            ["Metric", "Value"],
-            [
-                ["Repositories to refresh", report.repositories_to_update],
-                ["Repositories refreshed", report.repositories_refreshed],
-                ["New snapshots", report.snapshots_inserted],
-                ["Contributor rows added", report.contributors_added],
-                ["Developer profiles fetched", report.developer_profiles_fetched],
-            ],
-        )
+        query = select(CollectionRunRow).order_by(CollectionRunRow.started_at.desc()).limit(limit)
+        if run_id:
+            query = query.where(CollectionRunRow.id == run_id)
+        rows = (await session.execute(query)).scalars().all()
+        typer.echo(json.dumps([stored_report(row).model_dump() for row in rows], indent=2))
     finally:
-        await _housekeeping(client, engine, session)
+        await session.close()
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------

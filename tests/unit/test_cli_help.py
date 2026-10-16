@@ -50,6 +50,7 @@ def test_all_commands_available() -> None:
         + PHASE3_COMMANDS
         + PHASE4_COMMANDS
         + PHASE5_COMMANDS
+        + ["serve"]
     ):
         result = _invoke(command)
         assert result.exit_code == 0, (

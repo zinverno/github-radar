@@ -1,0 +1,47 @@
+# Editable sampling policy, not a taxonomy or a claim of ecosystem coverage.
+limit_per_cohort = 3
+per_page = 100
+contributors_limit = 30
+
+[budget]
+total = 100
+search = 10
+repository_details = 30
+contributors = 30
+profiles = 30
+
+[execution]
+max_candidates = 100
+max_new_repositories = 30
+max_seconds = 120
+
+[[categories]]
+name = "ai-agents"
+query = "topic:ai-agents"
+
+[[categories]]
+name = "developer-tools"
+query = "topic:developer-tools"
+
+[[categories]]
+name = "data-engineering"
+query = "topic:data-engineering"
+
+[[recipes]]
+name = "established"
+min_stars = 1000
+sort = "stars"
+
+[[recipes]]
+name = "recent"
+min_stars = 10
+max_stars = 999
+created_within_days = 365
+sort = "updated"
+
+[[recipes]]
+name = "recently-active"
+min_stars = 10
+max_stars = 999
+pushed_within_days = 30
+sort = "updated"

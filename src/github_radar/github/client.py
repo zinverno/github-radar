@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from github_radar.config import Settings, SettingsError
+from github_radar.github.budget import RequestBudget
 from github_radar.github.errors import (
     GitHubAPIError,
     GitHubConfigurationError,
@@ -97,10 +98,15 @@ class GitHubClient:
         settings: Settings,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        budget: RequestBudget | None = None,
     ) -> None:
         self.settings = settings
         self.base_url = settings.github_api_base_url.rstrip("/")
         self._pause_threshold = settings.rate_limit_pause_threshold
+        self._search_pause_threshold = settings.search_rate_limit_pause_threshold
+        self.budget = (
+            budget if budget is not None else RequestBudget(settings.github_request_budget)
+        )
         self._max_retries = settings.http_max_retries
         self._timeout = settings.http_timeout_seconds
 
@@ -119,6 +125,7 @@ class GitHubClient:
         )
         # Per-resource rate-limit state: {"core": ...}, {"search": ...}
         self._limits: dict[str, RateLimitState] = {}
+        self.before_attempt: Callable[[dict[str, int]], Awaitable[None]] | None = None
 
     def require_auth(self) -> None:
         """Fail fast (and loudly) when no token is configured."""
@@ -137,9 +144,9 @@ class GitHubClient:
         return {name: state for name, state in self._limits.items()}
 
     def _resource_for_url(self, url: str) -> str:
-        path = urlsplit(url).path
+        path = urlsplit(url).path.removeprefix(urlsplit(self.base_url).path.rstrip("/"))
         # GitHub reports the search endpoints under the "search" bucket.
-        return "search" if "/search/" in path else "core"
+        return "search" if path.startswith("/search/") else "core"
 
     async def get_json(
         self,
@@ -166,11 +173,20 @@ class GitHubClient:
         :class:`RateLimitExceeded` when quota is exhausted or too low.
         """
         resource = self._resource_for_url(url)
-        self._check_pause_threshold(resource)
+        target, base = urlsplit(url), urlsplit(self.base_url)
+        if (target.scheme, target.netloc) != (base.scheme, base.netloc):
+            raise GitHubConfigurationError(
+                "Refusing a request outside the configured GitHub origin"
+            )
+        path = urlsplit(url).path.removeprefix(urlsplit(self.base_url).path.rstrip("/"))
 
         last_transport_error: httpx.TransportError | None = None
 
         for attempt in range(max(1, self._max_retries)):
+            self._check_pause_threshold(resource)
+            self.budget.consume(path)
+            if self.before_attempt is not None:
+                await self.before_attempt(self.budget.used)
             try:
                 response = await self._client.request(
                     method, url, params=params, json=json, headers=headers
@@ -218,6 +234,8 @@ class GitHubClient:
         when it is absent or a page comes back short.
         """
         page = 1
+        if not 1 <= per_page <= 100 or (max_items is not None and max_items < 0):
+            raise ValueError("Invalid pagination bounds")
         fetched = 0
         next_url: str | None = url
         while True:
@@ -229,6 +247,8 @@ class GitHubClient:
             assert next_url is not None
             response = await self.request("GET", next_url, params=query)
 
+            if response.status_code == 204:
+                return
             body = response.json()
             if items_key is None:
                 items = body
@@ -250,6 +270,8 @@ class GitHubClient:
                     url=url,
                     response_body=response.text,
                 )
+            if isinstance(body, dict) and body.get("incomplete_results"):
+                raise GitHubError("GitHub returned incomplete search results")
             for item in items:
                 if max_items is not None and fetched >= max_items:
                     return
@@ -259,6 +281,8 @@ class GitHubClient:
             header_next = _next_link(response.headers.get("link") or "")
             if header_next is None or not items or len(items) < per_page:
                 return
+            if urlsplit(header_next).path != urlsplit(url).path:
+                raise GitHubError("Pagination changed endpoint; refusing to follow it")
             next_url = header_next
             page += 1
 
@@ -276,6 +300,7 @@ class GitHubClient:
                     payload.get("reset", 0), tz=UTC
                 ),
             )
+        self._limits.update(states)
         return states
 
     async def close(self) -> None:
@@ -296,7 +321,8 @@ class GitHubClient:
         if state is None or state.remaining is None:
             return
         now = datetime.now(UTC)
-        if state.remaining <= self._pause_threshold and (
+        threshold = self._search_pause_threshold if resource == "search" else self._pause_threshold
+        if state.remaining <= threshold and (
             state.reset_at is None or state.reset_at > now
         ):
             raise RateLimitExceeded(
@@ -305,13 +331,14 @@ class GitHubClient:
                 reset_at=state.reset_at,
                 message=(
                     f"Remaining {resource} quota ({state.remaining}) is at or "
-                    f"below the pause threshold ({self._pause_threshold}); "
+                    f"below the pause threshold ({threshold}); "
                     "refusing to continue until the window resets."
                 ),
             )
 
     def _record_rate_limits(self, response: httpx.Response, resource: str) -> None:
         headers = response.headers
+        resource = headers.get(HDR_RESOURCE) or resource
         remaining = _parse_int_header(headers.get(HDR_REMAINING))
         if remaining is None:
             return

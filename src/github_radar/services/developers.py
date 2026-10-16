@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,6 +72,16 @@ class DeveloperSyncService:
         self.session = session
         self.refresh_days = refresh_days
 
+    async def stage_profile(self, contributor: Contributor, *, now: datetime) -> bool:
+        """Fetch only when stale; stage profile and history in the caller's transaction."""
+        if not await self._needs_refresh(contributor.developer.github_id, now):
+            return False
+        profile = await get_user_profile(self.client, contributor.developer.login)
+        if profile.github_id != contributor.developer.github_id:
+            raise ValueError("Developer login now resolves to a different GitHub ID")
+        await sync_profile(self.session, profile, now=now)
+        return True
+
     async def sync(
         self,
         contributors: Sequence[Contributor],
@@ -116,7 +126,7 @@ class DeveloperSyncService:
         if fetched_at is None:
             return True
         threshold = now - timedelta(days=self.refresh_days)
-        return fetched_at < threshold
+        return fetched_at.replace(tzinfo=UTC) <= threshold
 
 
 __all__ = ["DeveloperSyncService", "ProfileSyncStats"]

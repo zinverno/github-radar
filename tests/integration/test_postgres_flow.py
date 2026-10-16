@@ -510,7 +510,7 @@ async def test_mocked_discovery_and_update_preserves_history(
         sess = make_session()
         try:
             report = await RepositoryDiscoveryService(client, sess).discover(
-                query="mcp", limit=50
+                query="mcp", limit=50, enrich=True
             )
         finally:
             await sess.close()

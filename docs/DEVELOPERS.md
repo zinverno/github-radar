@@ -13,8 +13,9 @@ nothing to report).
 
 ## 1. Observation policy
 
-Two new append-only tables record developer history (written during
-`discover`/`update`, no extra API cost):
+Two append-only tables record developer history. Since Phase 6.5 Checkpoint B,
+the CLI writes these through explicit `enrich` runs; lightweight discovery and
+repository refresh do not fetch contributors or profiles:
 
 - `developer_snapshots` — one row per profile fetch: `followers`, `following`,
   `public_repos` at `captured_at`. One observation per instant per developer.
@@ -23,6 +24,9 @@ Two new append-only tables record developer history (written during
 
 Both reuse the Phase 2 policy: deduplicated on `captured_at` (a same-instant
 re-observation replaces), different instants always append.
+Fresh profiles and completed contributor batches are reused within
+`PROFILE_REFRESH_DAYS`, without manufacturing new observations. See
+[bounded collection](CHECKPOINT_B.md) for explicit limits and recovery.
 
 **Cumulative counts are not activity.** GitHub's `/contributors` count is
 lifetime, so a single `contributor_snapshots` row says nothing about recent

@@ -20,6 +20,28 @@ def _quote_slug(value: str) -> str:
     return quote(value, safe="")
 
 
+def build_search_query(
+    *,
+    query: str,
+    language: str | None = None,
+    topic: str | None = None,
+    min_stars: int | None = None,
+    created_after: date | None = None,
+) -> str:
+    """Build the same query for local previews and actual searches."""
+    terms = [query.strip()]
+    if language:
+        terms.append(f"language:{language}")
+    if topic:
+        terms.append(f"topic:{topic}")
+    if min_stars is not None:
+        terms.append(f"stars:>={min_stars}")
+    if created_after is not None:
+        terms.append(f"created:>={created_after.isoformat()}")
+
+    return " ".join(terms)
+
+
 async def search_repositories(
     client: GitHubClient,
     *,
@@ -34,20 +56,15 @@ async def search_repositories(
     per_page: int = 100,
 ) -> AsyncIterator[Repository]:
     """Iterate ``GET /search/repositories`` results as domain Repositories."""
-    terms = [query.strip()]
-    if language:
-        terms.append(f"language:{language}")
-    if topic:
-        terms.append(f"topic:{topic}")
-    if min_stars is not None:
-        terms.append(f"stars:>={min_stars}")
-    if created_after is not None:
-        terms.append(f"created:>={created_after.isoformat()}")
-
-    q = " ".join(terms)
+    q = build_search_query(
+        query=query, language=language, topic=topic,
+        min_stars=min_stars, created_after=created_after,
+    )
     logger.info("Searching GitHub repositories: q=%r (limit=%s)", q, limit)
     url = f"{client.base_url}/search/repositories"
     params = {"q": q, "sort": sort, "order": order}
+    if sort == "best-match":
+        del params["sort"]
 
     async for item in client.paginate(
         url, params=params, per_page=per_page, max_items=limit, items_key="items"
@@ -172,6 +189,7 @@ async def get_commits(
 
 
 __all__ = [
+    "build_search_query",
     "get_commits",
     "get_contributors",
     "get_readme",

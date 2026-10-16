@@ -1,32 +1,19 @@
-"""Repository discovery orchestration.
+"""Repository discovery and lightweight staging for bounded collection.
 
-Flow per search result:
-
-    search result → already tracked?
-        yes → refresh mutable metadata from the search payload (free)
-        no  → full detail fetch
-               ↓ metadata    (detail also carries topics)
-               ↓ topics
-               ↓ snapshot
-               ↓ contributors
-               ↓ developer profiles (lazy/throttled)
-               ↓ commit
-
-Cost awareness: the detail + contributors fetches happen only for newly
-discovered repositories. Known repositories are refreshed from the (already
-returned) search payload and never re-fetched during discovery — the
-``update`` command exists for that.
+The bounded CLI calls ``stage_lightweight`` and commits with provenance.
+The legacy ``discover`` entry point remains available; contributor/profile
+fetches there require explicit ``enrich=True``.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from github_radar.domain import RepositorySnapshot
+from github_radar.domain import Repository, RepositorySnapshot
 from github_radar.github.client import GitHubClient
 from github_radar.github.repositories import (
     get_contributors,
@@ -35,6 +22,7 @@ from github_radar.github.repositories import (
 )
 from github_radar.services.developers import DeveloperSyncService
 from github_radar.storage import repositories as storage
+from github_radar.storage.models import RepositoryRow
 from github_radar.util import utcnow
 
 logger = logging.getLogger(__name__)
@@ -71,6 +59,30 @@ class RepositoryDiscoveryService:
         self.refresh_days = refresh_days
         self.per_page = per_page
 
+    async def stage_lightweight(
+        self, candidate: Repository, *, now: datetime,
+    ) -> tuple[RepositoryRow, bool]:
+        """Stage one identity-checked repository; caller commits with provenance."""
+        existing = await storage.get_repository_by_github_id(self.session, candidate.github_id)
+        if existing is not None:
+            # The stable ID survives renames; search must not replace richer detail fields.
+            existing.owner_login = candidate.owner_login
+            existing.name = candidate.name
+            existing.full_name = candidate.full_name
+            await self.session.flush()
+            return existing, False
+        detail = await get_repository(self.client, candidate.owner_login, candidate.name)
+        if detail.github_id != candidate.github_id:
+            raise ValueError("Repository identity changed between search and detail")
+        if detail.visibility != "public":
+            raise ValueError("Lightweight discovery requires a public repository")
+        row, created = await storage.upsert_repository(self.session, detail, now=now)
+        await storage.set_repository_topics(self.session, row, detail.topics, now=now)
+        await storage.record_observation(
+            self.session, row.id, RepositorySnapshot.from_repository(detail, now)
+        )
+        return row, created
+
     async def discover(
         self,
         *,
@@ -82,6 +94,7 @@ class RepositoryDiscoveryService:
         limit: int | None = None,
         sort: str = "stars",
         order: str = "desc",
+        enrich: bool = False,
     ) -> DiscoveryReport:
         """Search GitHub and persist newly discovered repositories."""
         report = DiscoveryReport(query=query, requested_limit=limit)
@@ -137,6 +150,10 @@ class RepositoryDiscoveryService:
             )
             if inserted is not None:
                 report.snapshots_inserted += 1
+
+            if not enrich:
+                await self.session.commit()
+                continue
 
             contributors = await get_contributors(
                 self.client,

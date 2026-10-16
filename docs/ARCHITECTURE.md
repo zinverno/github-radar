@@ -59,6 +59,8 @@ never writes back, so it can always be re-derived from freshly stored data.
 | `analytics/confidence.py` | Deterministic data-coverage `LOW`/`MEDIUM`/`HIGH` model |
 | `discovery/service.py` | Discovery orchestration |
 | `services/update.py` | Update orchestration |
+| `services/collection.py` | Bounded execution, per-operation commits, durable partial reports |
+| `storage/collection.py` | Discovery provenance, stale-first selection, contributor checkpoint reuse |
 | `services/developers.py` | Throttled profile sync |
 | `graph/model.py` | `EcosystemGraph` + node/edge dataclasses, incremental construction, typed access, `filter()` |
 | `graph/loader.py` | Build the graph from PostgreSQL in a fixed number of batched queries |
@@ -173,37 +175,67 @@ evidence changes → new fingerprint → new row (old rows are never deleted).
 
 ## Data flow
 
-### Discovery (`discover` command → `RepositoryDiscoveryService.discover`)
+### Bounded discovery (`discover` / `discover-execute` → `CollectionService`)
 
 ```
-search query (q, language, topic, min_stars, created_after)
+reviewed cohorts (or the existing single-query discovery command)
   → GET /search/repositories (paginated, sort/order, per_page ≤ 100)
   → for each result:
+       deduplicate by stable GitHub repository ID across all cohorts
        is it already tracked?
-         yes → upsert mutable metadata from the SEARCH payload (no extra API call)
-         no  → GET /repos/{owner}/{repo}          (topics ride along)
+         yes → reuse rich metadata/history; update identity's current name
+         no  → GET /repos/{owner}/{repo}, verify same GitHub ID and public visibility
                → upsert repository row
                → set topics
-               → insert snapshot (if changed)
-               → GET /repos/{owner}/{repo}/contributors
-               → sync contributor associations
-               → commit (per repository)
-               → throttle profile fetch per new developer (GET /users/{login})
+               → record initial observation
+       → persist category/recipe/query provenance, including cross-cohort duplicates
+       → commit repository + provenance + report checkpoint together
 ```
 
-Cost is intentional: expensive per-repo calls happen **only for newly discovered
-repositories**. Already-known repos are refreshed from the search payload alone;
-the `update` command exists for full re-observations.
+`RepositoryDiscoveryService.stage_lightweight` reuses existing storage helpers.
+Discovery makes no contributor/profile requests. A candidate slot is not a
+guaranteed unique or newly saved repository.
 
-### Update (`update` command → `RepositoryUpdateService.update`)
+### Explicit enrichment (`enrich` → `CollectionService`)
 
-For every tracked repository: fetch detail, upsert metadata + topics, insert a
-snapshot *if counter state changed*, refresh contributors, refresh stale
-profiles. Developer profiles are re-fetched at most once per
-`PROFILE_REFRESH_DAYS` (tracked via `developers.profile_fetched_at`). Each
-profile fetch writes a `developer_snapshots` row and each contributor sync
-writes `contributor_snapshots` rows, so developer intelligence accumulates
-history without any extra API cost.
+Explicit tracked repository references, contributor row limits and profile
+request caps bound the work. Fresh contributor batches are reused (including
+empty results); otherwise verify repository identity, fetch the bounded batch,
+and commit relationships, contributor observations and a fetch checkpoint.
+`DeveloperSyncService.stage_profile` reuses profiles within
+`PROFILE_REFRESH_DAYS`; stale/missing profiles and their observations commit
+individually. The same TTL controls contributor-batch reuse. A larger requested
+batch invalidates a smaller checkpoint. Profile failures can be retried without
+re-fetching a fresh completed contributor batch.
+
+### Manual refresh (`refresh` / `update` → `CollectionService`)
+
+Select by the latest repository observation, never-observed first, then oldest,
+with GitHub ID as tie-breaker. Enforce the minimum interval, detail identity and
+nondecreasing observation time. `RepositoryUpdateService.stage_observation`
+updates metadata/topics and calls `record_observation` unconditionally. Commit
+each repository and its report checkpoint together. Refresh does not enrich.
+
+### Run persistence and interruption
+
+Migration 0005 adds `collection_runs`, `discovery_provenance`, and nullable
+`repositories.contributors_fetched_at` / `contributors_fetched_limit`.
+Each run retains its inputs, result checkpoints and durable HTTP reservations.
+Provenance is unique by repository/category/recipe/query hash and records first
+and latest discovery timestamps plus the latest run ID.
+
+Concurrency is one operation. The CLI pins its PostgreSQL advisory lock and
+collection session to one connection. The acquisition transaction commits before
+collection starts; each incremental session commit checks ownership on that same
+backend, including the terminal receipt. HTTP awaits hold no open transaction.
+Disconnects or missing ownership stop the run, and replacement connections are
+refused. Cleanup never reconnects or reacquires ownership; lost runs retain their
+last durable, unfinished receipt. Each attempt is reserved durably
+before HTTP; a crash between reservation and transport can overcount, never
+silently undercount. Work commits incrementally. Interrupted/unfinalized runs
+are never reported successful. Explicit reruns use a new budget, reuse saved
+IDs and fresh enrichment, and may repeat search pages. There is no job framework
+or persistent page cursor. See [Checkpoint B](CHECKPOINT_B.md) for details.
 
 ### Snapshot policy
 
@@ -227,10 +259,10 @@ growth is representable. Idempotency is per instant
 `captured_at` replaces that row (a raw correction), a new instant appends, and
 history from other instants is never rewritten.
 
-There is **no production scheduler yet**: services and the CLI still use the
-state-change-only filter, so the stored history remains a low-noise change log.
-Phase 2 only makes *periodic* observation possible — a future scheduler calls
-`record_observation` on each poll tick to fill in unchanged periods.
+There is **no production scheduler**. Checkpoint B's manual refresh uses
+`record_observation`, including unchanged counters. The state-change helper and
+legacy service entry points remain available; bounded CLI execution uses the
+staging methods above.
 
 ## GitHub API surface
 
@@ -251,9 +283,14 @@ Only the official REST API is used (no GraphQL yet).
 
 - Quota tracked **per resource** (`core` / `search`) from
   `X-RateLimit-Resource/Limit/Remaining/Reset` headers.
-- **Pause threshold** (default 50, `RATE_LIMIT_PAUSE_THRESHOLD`): when a
-  resource's remaining quota drops to the threshold, the client refuses further
-  requests (`RateLimitExceeded`) instead of guessing.
+- **Pause thresholds**: core uses `RATE_LIMIT_PAUSE_THRESHOLD` (default 50),
+  search uses `SEARCH_RATE_LIMIT_PAUSE_THRESHOLD` (default 2). Quota is checked
+  before every attempt, including retries; low quota raises `RateLimitExceeded`.
+- **Per-run request budgets** (`GITHUB_REQUEST_BUDGET`): total, search,
+  repository details, contributor pages and profile attempts are capped before
+  transport. Failures and retries consume the same caps. See
+  [Phase 6.5 Checkpoint A](DATA_EXPANSION.md) for local cohort planning,
+  dry-run boundaries, defaults and partial-run semantics.
 - **429** → retried after `Retry-After` (capped at 120 s); a 429 with no
   sleep time is treated as quota exhaustion.
 - **5xx / transport errors** → retried with exponential backoff, bounded by
@@ -521,22 +558,17 @@ Phase 5 `AI_*` set (`AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`,
   of GitHub.
 - **Graph centrality is structural** (degree-based) by design — deterministic
   and explainable, at the price of no spectral ranking.
-- **Discovery refreshes known repos cheaply.** Existing repositories are not
-  re-fetched in detail during `discover`; use `update` for full refresh +
-  snapshots.
-- **Snapshots record state changes, not a strict schedule.** If nothing
-  observable changed between two runs, no snapshot is written.
+- **Discovery reuses known identities.** Existing repositories are not
+  re-fetched in detail during `discover`; use `refresh`/`update` for metadata
+  and observations, and `enrich` for contributors/profiles.
+- **Snapshots record explicit polls.** Manual refresh records unchanged
+  counters too, but there is no strict collection schedule.
 - **Search is capped by GitHub** (100 items/page, ~1000 results) — discovery is
   query/topic scoped, not a full GitHub crawl.
-- **Analytics are snapshot-anchored.** No wall-clock scheduler produces time
-  series yet: current services/CLI use the state-change-only
-  `insert_snapshot_if_changed`, so repository history fills in only when state
-  changed. Developer history (Phase 3) grows on every `discover`/`update` run:
-  each profile fetch writes a developer snapshot and each contributor sync
-  writes contributor snapshots, whether or not counters changed. Periodic
-  observation on a strict schedule is *possible* (the storage boundary exposes
-  `record_observation`), but a scheduler that polls on a schedule is a future
-  pipeline, not yet built.
+- **Analytics are snapshot-anchored.** Repository history grows through explicit
+  observations. Developer/contributor history grows through explicit enrichment
+  when TTL reuse does not apply. One observation establishes no growth signal.
+  Existing analytics formulas and read-only API projections are unchanged.
 
 ## Extension points
 

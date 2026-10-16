@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +13,7 @@ from github_radar.github.client import GitHubClient
 from github_radar.github.repositories import get_contributors, get_repository
 from github_radar.services.developers import DeveloperSyncService
 from github_radar.storage import repositories as storage
+from github_radar.storage.models import RepositoryRow
 from github_radar.util import utcnow
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,22 @@ class RepositoryUpdateService:
         self.session = session
         self.contributors_limit = contributors_limit
         self.refresh_days = refresh_days
+
+    async def stage_observation(self, row: RepositoryRow, *, now: datetime) -> bool:
+        """Stage a real poll, retaining other timestamps; caller owns the commit."""
+        latest = await storage.latest_snapshot(self.session, row.id)
+        latest_at = latest.captured_at.replace(tzinfo=UTC) if latest else None
+        if latest_at is not None and now < latest_at:
+            raise ValueError("Refresh clock precedes the newest observation")
+        detail = await get_repository(self.client, row.owner_login, row.name)
+        if detail.github_id != row.github_id:
+            raise ValueError("Repository name now resolves to a different GitHub ID")
+        current, _ = await storage.upsert_repository(self.session, detail, now=now)
+        await storage.set_repository_topics(self.session, current, detail.topics, now=now)
+        await storage.record_observation(
+            self.session, current.id, RepositorySnapshot.from_repository(detail, now)
+        )
+        return latest_at != now
 
     async def update(self, *, limit: int | None = None) -> UpdateReport:
         report = UpdateReport()

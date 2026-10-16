@@ -180,6 +180,26 @@ drill-downs, the ecosystem graph and the AI narration console (see
   `github-radar serve` process is the whole UI+API. A Vite dev server (with
   `/api` proxying) is used during development.
 
+## Phase 6.5 — Checkpoints A and B
+
+Local discovery planning is available before collecting data:
+
+```bash
+uv run github-radar discover-plan --as-of 2026-10-16
+uv run github-radar discover "mcp" --language python --dry-run
+```
+
+Edit `config/discovery.toml` to select categories, recipes, cohort quotas and
+execution limits. Previews use no HTTP requests or database connections.
+Checkpoint B adds reviewed-plan execution, lightweight discovery, explicit
+enrichment, stale-first refresh and durable run summaries. HTTP caps include
+every retry and page; partial runs exit nonzero and retain completed work.
+
+See [planning and budgets](docs/DATA_EXPANSION.md) and the
+[Checkpoint B operations guide](docs/CHECKPOINT_B.md) for commands, migration
+0005, recovery semantics and the verified first live pilot: five unique
+repositories and observations from six candidates, with no enrichment.
+
 ## Requirements
 
 - Python 3.12+ (managed via `uv`)
@@ -272,8 +292,13 @@ uv run github-radar discover --help
 | Command | Purpose |
 | --- | --- |
 | `github-radar init-db` | create/upgrade the schema (Alembic) |
-| `github-radar discover "mcp" --language python --limit 50` | search & store |
-| `github-radar update --limit 100` | refresh tracked repos + new snapshots |
+| `github-radar discover-plan --category ai-agents --recipe recent` | local plan JSON |
+| `github-radar discover-execute reviewed.json --dry-run` | validate and preview a reviewed plan; omit dry-run to execute |
+| `github-radar discover "mcp" --language python --limit 25` | lightweight discovery; candidate limit includes duplicates |
+| `github-radar enrich owner/repo --max-profiles 2 --contributors-limit 5` | explicit contributor/profile enrichment |
+| `github-radar refresh --limit 10 --min-refresh-hours 24` | stale-first repository observations |
+| `github-radar update --limit 10` | compatible name for bounded stale-first refresh |
+| `github-radar collection-runs --limit 10` | durable summaries, including partial/unfinished work |
 | `github-radar repos` | list tracked repositories & latest counters |
 | `github-radar repo owner/repository` | full detail for one repository |
 | `github-radar stats` | dataset statistics |
@@ -313,9 +338,10 @@ uv run github-radar repo modelcontextprotocol/servers
 uv run github-radar stats
 ```
 
-Running `discover`/`update` again later does **not** overwrite history: it
-appends new snapshots whenever counters changed, so growth can be measured over
-time.
+Discovery reuses known repository IDs without duplicating their initial
+observations. `refresh`/`update` append observations for due repositories even
+when counters are unchanged. Contributor/profile enrichment is a separate
+explicit command. All preserve observations at other timestamps.
 
 ## Web UI (Phase 6)
 
@@ -351,14 +377,13 @@ is the fact that we fetched that state at an instant. Analytics can only tell
 "observed and standing still" apart from "not observed" if identical re-polls
 are recorded.
 
-- `insert_snapshot_if_changed` (used by `discover`/`update`) is
-  **state-change-only**: it writes only when counters differ from the newest
-  stored snapshot, so the historical table stays a low-noise change log.
-  Identical observations are skipped — no meaningless duplicates.
-- `record_observation` is the unconditional form for periodic pollers: it
+- `insert_snapshot_if_changed` remains available to legacy service callers as
+  a **state-change-only** filter; it writes when counters differ from the newest
+  stored snapshot.
+- `record_observation`, used by bounded discovery and manual refresh, is
+  unconditional: it
   persists **every** observation, even unchanged counters, so a repository
-  observed twice with identical state is stored as two rows. (Phase 2 exposes
-  this boundary; no scheduler is built yet.)
+  observed twice with identical state is stored as two rows. There is no scheduler.
 
 Since **Phase 2**, one observation is stored per instant: the table enforces a
 unique `(repository_id, captured_at)` constraint. A re-observation at the same
