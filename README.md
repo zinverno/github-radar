@@ -200,6 +200,19 @@ See [planning and budgets](docs/DATA_EXPANSION.md) and the
 0005, recovery semantics and the verified first live pilot: five unique
 repositories and observations from six candidates, with no enrichment.
 
+Checkpoint C adds read-only coverage, ranking evidence and receipt-cost reports:
+
+```bash
+uv run --env-file .env github-radar collection quality --json
+uv run --env-file .env github-radar collection stats --json
+```
+
+These distinguish missing growth from observed zero, curated categories from
+GitHub topics, and measured costs from provisional scaling estimates. See
+[dataset quality and controlled expansion](docs/DATA_QUALITY.md) for the current
+five-repository assessment, known ranking limitations and the unexecuted next
+pilot. Existing scoring formulas are unchanged.
+
 ## Requirements
 
 - Python 3.12+ (managed via `uv`)

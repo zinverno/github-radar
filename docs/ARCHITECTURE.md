@@ -61,6 +61,10 @@ never writes back, so it can always be re-derived from freshly stored data.
 | `services/update.py` | Update orchestration |
 | `services/collection.py` | Bounded execution, per-operation commits, durable partial reports |
 | `storage/collection.py` | Discovery provenance, stale-first selection, contributor checkpoint reuse |
+| `analytics/quality.py` | Coverage counts and diagnostics of existing repository/developer scores |
+| `services/quality.py` | Batched stored-evidence loading for quality reports |
+| `services/collection_diagnostics.py` | Receipt accounting and explicit cost projection assumptions |
+| `cli/collection.py` | Read-only `collection quality` / `collection stats` commands |
 | `services/developers.py` | Throttled profile sync |
 | `graph/model.py` | `EcosystemGraph` + node/edge dataclasses, incremental construction, typed access, `filter()` |
 | `graph/loader.py` | Build the graph from PostgreSQL in a fixed number of batched queries |
@@ -238,6 +242,18 @@ IDs and fresh enrichment, and may repeat search pages. There is no job framework
 or persistent page cursor. See [Checkpoint B](CHECKPOINT_B.md) for details.
 
 ### Snapshot policy
+
+Checkpoint C's `collection quality` and `collection stats` use a PostgreSQL
+REPEATABLE READ, READ ONLY transaction. They do not construct GitHub clients,
+collect data, change receipts or acquire the collector's advisory lock.
+Coverage counts stable GitHub IDs once and keeps curated provenance categories
+separate from GitHub topics. Repository diagnostics reuse `compute_metrics`,
+`compute_momentum`, `classify_trend` and confidence; developer diagnostics reuse
+activity/emerging and graph bridge functions. The diagnostic layer exposes
+partial windows and raw components without changing scoring weights or labels.
+Receipt projections explicitly separate measured reservations from illustrative
+estimates/caps. See [dataset quality](DATA_QUALITY.md) for temporal semantics,
+known model limitations and controlled expansion proposals.
 
 A **state** is the repository's counters at a point in time. An
 **observation** is a fact that we fetched that state at a specific instant.

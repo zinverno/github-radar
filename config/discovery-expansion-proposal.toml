@@ -1,0 +1,54 @@
+# Checkpoint C proposal only. Generating a plan is local; execution needs authorization.
+# 6 categories x 2 recipes x 5 candidates = 60 slots, not 60 unique/new repositories.
+limit_per_cohort = 5
+per_page = 100
+contributors_limit = 0
+
+[budget]
+total = 180
+search = 36
+repository_details = 144
+contributors = 0
+profiles = 0
+
+[execution]
+max_candidates = 60
+max_new_repositories = 50
+max_seconds = 300
+
+[[categories]]
+name = "ai-agents"
+query = "topic:ai-agents"
+
+[[categories]]
+name = "coding-agents"
+query = "topic:coding-agent"
+
+[[categories]]
+name = "mcp"
+query = "topic:mcp"
+
+[[categories]]
+name = "developer-tools"
+query = "topic:developer-tools"
+
+[[categories]]
+name = "obsidian-pkm"
+query = "topic:obsidian"
+
+[[categories]]
+name = "local-ai"
+query = "topic:local-llm"
+
+[[recipes]]
+name = "recent"
+min_stars = 10
+max_stars = 999
+created_within_days = 365
+sort = "updated"
+
+[[recipes]]
+name = "established-active"
+min_stars = 1000
+pushed_within_days = 30
+sort = "updated"

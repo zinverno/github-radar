@@ -87,6 +87,7 @@ from github_radar.analytics import (
     rank_repositories,
 )
 from github_radar.analytics.trends import classify_trend
+from github_radar.cli.collection import app as collection_app
 from github_radar.config import Settings, SettingsError, get_settings
 from github_radar.config.settings import GitHubRequestLimits
 from github_radar.discovery import DiscoveryReport
@@ -152,6 +153,7 @@ app = typer.Typer(
     "repositories over time.",
     no_args_is_help=True,
 )
+app.add_typer(collection_app, name="collection")
 
 
 # ---------------------------------------------------------------------------
