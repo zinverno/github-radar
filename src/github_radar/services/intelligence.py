@@ -152,7 +152,7 @@ class DeveloperIntelligenceService:
         """Load the full tracked ecosystem into analytics-ready structures.
 
         ``reference_now`` defaults to the newest observation ``captured_at``
-        anywhere in the dataset (contributor or repository snapshots), falling
+        anywhere in the dataset (repository, contributor or profile snapshots), falling
         back to the wall clock only when the dataset has no observations at all
         — in which case there is nothing to report anyway.
         """

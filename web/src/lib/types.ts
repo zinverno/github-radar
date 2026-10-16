@@ -54,6 +54,8 @@ export interface Trend {
   explanation: string;
   growth_pct: number | null;
   recency: number | null;
+  window_days: number;
+  window: Window | null;
 }
 
 export interface ConfidenceBody {
@@ -157,6 +159,8 @@ export interface RepositoryDetail {
   topics: string[];
   snapshot_count: number;
   metrics: {
+    stars_7d: FieldDelta | null;
+    stars_30d: FieldDelta | null;
     latest_captured_at: IsoString | null;
     latest_pushed_at: IsoString | null;
     snapshot_count: number;

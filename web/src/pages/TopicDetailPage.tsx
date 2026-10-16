@@ -4,6 +4,7 @@ import { ConfidenceBar, TrendBadge } from "../components/confidence";
 import { LevelTag, Property } from "../components/misc";
 import { topicDetail } from "../lib/endpoints";
 import { pct, plain, score } from "../lib/format";
+import { observationWindowLabel } from "../lib/trends";
 import { useAsync } from "../lib/useAsync";
 
 export function TopicDetailPage() {
@@ -82,12 +83,20 @@ export function TopicDetailPage() {
                       <TrendBadge
                         trend={repo.trend.trend}
                         explanation={repo.trend.explanation}
+                        window={repo.trend.window}
                       />
                     ) : (
                       "—"
                     )}
                   </td>
-                  <td>{repo.stars_growth_pct == null ? "—" : pct(repo.stars_growth_pct)}</td>
+                  <td>
+                    {repo.stars_growth_pct == null ? "—" : pct(repo.stars_growth_pct / 100)}
+                    {repo.trend && (
+                      <div className="muted">
+                        {observationWindowLabel(repo.trend.window, repo.trend.window_days)}
+                      </div>
+                    )}
+                  </td>
                   <td>{score(repo.momentum?.score)}</td>
                   <td>
                     <ConfidenceBar value={repo.confidence.score} level={repo.confidence.level} />

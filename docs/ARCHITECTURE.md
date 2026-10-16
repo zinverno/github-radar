@@ -371,8 +371,14 @@ touching callers.
 ### Trends (`analytics/trends.py`)
 
 `classify_trend(metrics, momentum, *, reference_now)` labels a repository
-`rising` / `steady` / `declining` / `inactive` / `new` from its 7-day star
-growth (thresholds ±5 pp) and recency (< 0.05 ⇒ `inactive`). `rank_repositories`
+`rising` / `steady` / `declining` / `inactive` / `new` from observed star
+growth selected for a requested 7-day window (thresholds ±5 pp) and recency
+(< 0.05 ⇒ `inactive`). `Trend.window_days` is the request; `Trend.window`
+contains the actual endpoints, span and completeness. Explanations always name
+the observed span and flag partial coverage, including fallback bases and large
+baseline gaps. Partial-window classification/scoring is retained; it is not
+evidence of full-period growth. CLI/API/web expose coverage separately from
+confidence and keep missing values distinct from observed zero. `rank_repositories`
 filters out repositories without a computable momentum, sorts the rest by score
 descending and attaches each row's 7-day window confidence — the pure core
 behind `trending`.
@@ -414,7 +420,8 @@ fabricated zero.
   classification with small-sample and fame protections.
 - `services/intelligence.py` — `DeveloperIntelligenceService.load_dataset`
   assembles `RepoContext` / `ContributorLink` / `DeveloperContext` from storage
-  and anchors `reference_now` on the newest real `captured_at` observation
+  and anchors `reference_now` on the maximum real `captured_at` across repository,
+  contributor and developer profile snapshots (one SQL statement; no source precedence)
   (wall clock only when the dataset is empty); `build_reports` produces one
   digest per developer. `filter_reports` implements the `developers` filters.
 - Public contacts are built only from profile fields GitHub exposes on purpose

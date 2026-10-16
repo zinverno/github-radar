@@ -139,26 +139,55 @@ The 500-repository fixture tests deterministic aggregation, overlap and ranking
 diagnostics, not production latency or real ranking quality. There is no formula
 or weight change in Checkpoint C.
 
-### Existing correctness issues: separate proposed fixes
+### Correctness remediation after Checkpoint C
 
-These are documented for a later, explicitly reviewed change, not repaired here:
+Both issues recorded by Checkpoint C were confirmed and addressed separately
+from scoring policy:
 
-- `classify_trend` can describe a partial fallback span as “7-day” growth and
-  classify a six-hour decline as declining. `compute_momentum` also accepts
-  partial windows by existing design. The diagnostic reports the raw existing
-  label and flags `trend_supported_by_complete_7d: false`. Proposed narrow fix:
-  make trend explanations use the actual observed span and explicitly label
-  partial coverage; requiring complete windows for classification/ranking is a
-  separate policy decision. Never infer a negative full-period trend from
-  insufficient coverage.
-- `storage.newest_observation_at` returns newest contributor time whenever one
-  exists, otherwise newest repository time. It can therefore precede newer
-  repository observations, contrary to its “newest anywhere” description.
-  Proposed narrow fix: return the maximum of both non-null timestamps and add
-  a regression where repository history is newer. The current diagnostic keeps
-  existing semantics and exposes
-  `developer_anchor_precedes_repository_observation`. It is false in this pilot
-  and true in the dedicated synthetic PostgreSQL regression.
+- Trend explanations previously hard-coded “7-day star growth” even for two
+  days of history. They now state the **actual observed duration**, the requested
+  seven days and complete/partial coverage. API trend objects also expose
+  `window_days` and `window` (start, end, span_days, complete). CLI ranking tables
+  and web views display the same distinction. Missing history remains null;
+  unchanged counters at a later timestamp yield a real zero. A zero baseline
+  still makes percentage growth unavailable, even when an absolute delta exists.
+  Web growth values are converted from API percentage points to the ratio
+  expected by the display formatter: 10% no longer renders as 1000%.
+- `storage.newest_observation_at` previously returned contributor time whenever
+  one existed, ignoring newer repository and profile observations. It now reads
+  the maximum `captured_at` across **repository, contributor and developer profile
+  snapshots** in one SQL statement. Each source can advance independently and
+  is relevant to developer activity/profile/emerging evidence. Metadata such as
+  `last_seen_at`, GitHub timestamps and the wall clock are not observation anchors.
+  The helper returns null only when all three tables are empty; existing callers'
+  empty-dataset clock fallback is not used as a fabricated observation.
+
+The shared anchor is used by developer services, graph/API/CLI consumers and
+quality diagnostics. A newer repository/profile observation can move old
+contributor endpoints outside a requested window: activity becomes unavailable,
+not zero. A real pair of equal contribution counts still gives observed zero
+at a reference time for which that pair is usable. Explicit reference overrides
+remain deterministic. `developer_anchor_precedes_repository_observation` remains
+in the diagnostic JSON for compatibility and is false with the corrected rule
+in a consistent database read.
+
+Ranking weights, growth-window selection, confidence formulas and trend
+thresholds are unchanged. Partial intervals can still receive a trend label
+and momentum score; the label describes that observed interval, **not** a full
+seven-day trend. Requiring complete windows for ranking is a separate policy
+decision. Existing completeness is an endpoint/base-gap rule: it does not imply
+continuous sampling, dense history, current freshness or statistical probability.
+Even a complete seven-day selection may span eight observed days; the explanation
+reports eight. Developer/graph scores and ordering can legitimately change when
+the corrected reference includes newer evidence. No stored history is modified.
+
+Remediation verification: **481 Python tests passed**, including **45 PostgreSQL
+integration cases** on the guarded `github_radar_test`, with no skips. Ruff,
+mypy (130 source files) and diff checks passed. Frontend lint, typecheck, all
+**35 tests** and the production build passed. Regressions cover complete,
+partial, missing and unchanged observations, actual CLI/API/web presentation,
+conflicting source timestamps, profile-only history and deterministic overrides.
+No live collection, provider requests or application database writes were used.
 
 ## Receipt costs and scaling estimates
 
@@ -279,7 +308,7 @@ developers. This enrichment proposal is also unexecuted.
 
 ## Verification and limitations
 
-Final checks: **455 tests passed** in 34.02 seconds, including **42 PostgreSQL
+Checkpoint C acceptance checks: **455 tests passed** in 34.02 seconds, including **42 PostgreSQL
 integration cases**, with no skips. The 28 new tests passed independently first.
 Ruff passed; mypy passed for 129 source files; `git diff --check` passed.
 Three existing deprecation warnings remain (Alembic configuration and Starlette
@@ -300,6 +329,6 @@ All evidence is loaded in memory for a manual report. Batched database reads
 avoid per-repository report queries, but arbitrarily large lifetime history and
 all-pairs category overlap are not streaming operations. There is no new
 retention system, historical metadata reconstruction or statistical inference.
-The known scoring/anchor issues above require separate review. No schema,
-analytics formula, safety guard, collection behavior or frontend change is part
-of this checkpoint.
+The remaining ranking-policy limitations above require separate review. The
+remediation changes presentation and reference selection; schema, analytics
+formulas, safety guards and collection behavior remain unchanged.

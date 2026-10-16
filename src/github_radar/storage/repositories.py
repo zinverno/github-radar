@@ -694,17 +694,23 @@ async def snapshots_by_repository_ids(
 
 
 async def newest_observation_at(session: AsyncSession) -> datetime | None:
-    """The newest contributor/repository snapshot ``captured_at`` dataset-wide.
+    """Maximum repository, contributor or profile ``captured_at`` dataset-wide.
 
     Used as the deterministic ``reference_now`` anchor for developer analytics:
-    never the wall clock, always a real observed instant.
+    Each source can advance independently. Read all maxima in one statement;
+    no source takes precedence and no metadata/wall-clock time is substituted.
+    Return None only when all three observation tables are empty.
     """
-    newest = await session.scalar(
-        select(func.max(ContributorSnapshotRow.captured_at))
+    timestamps = (await session.execute(
+        select(
+            select(func.max(SnapshotRow.captured_at)).scalar_subquery(),
+            select(func.max(ContributorSnapshotRow.captured_at)).scalar_subquery(),
+            select(func.max(DeveloperSnapshotRow.captured_at)).scalar_subquery(),
+        )
+    )).one()
+    return max(
+        (timestamp for timestamp in timestamps if timestamp is not None), default=None
     )
-    if newest is None:
-        newest = await session.scalar(select(func.max(SnapshotRow.captured_at)))
-    return newest
 
 
 # ---------------------------------------------------------------------------

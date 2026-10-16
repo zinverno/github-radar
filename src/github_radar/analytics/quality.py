@@ -154,7 +154,14 @@ def repository_quality(
                 "windows": windows,
                 "momentum": asdict(momentum) if momentum else None,
                 "confidence_7d": asdict(confidence),
-                "existing_trend": asdict(trend),
+                "existing_trend": {
+                    **asdict(trend),
+                    "window": {
+                        **asdict(trend.window),
+                        "start": trend.window.start.isoformat() if trend.window.start else None,
+                        "end": trend.window.end.isoformat() if trend.window.end else None,
+                    } if trend.window else None,
+                },
                 "trend_supported_by_complete_7d": windows["7"]["status"] == "complete",
                 "provenance": [
                     asdict(p)

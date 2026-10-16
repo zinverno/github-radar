@@ -5,6 +5,7 @@ import { FreshnessNote } from "../components/StaleBadge";
 import { useAsync } from "../lib/useAsync";
 import { explore } from "../lib/endpoints";
 import { compact, pct, score, signed } from "../lib/format";
+import { observationWindowLabel } from "../lib/trends";
 import type { RepoRanksRow, TopicAggregate } from "../lib/types";
 
 function RepoRow({ row }: { row: RepoRanksRow }) {
@@ -18,12 +19,14 @@ function RepoRow({ row }: { row: RepoRanksRow }) {
           <TrendBadge
             trend={row.trend.trend}
             explanation={row.trend.explanation}
+            window={row.trend.window}
           />
         )}
       </div>
       <div className="repo-meta">
-        ★ {compact(row.stars)} · growth {pct(row.stars_growth_pct)} · momentum{" "}
+        ★ {compact(row.stars)} · growth {pct(row.stars_growth_pct == null ? null : row.stars_growth_pct / 100)} · momentum{" "}
         {score(row.score)}
+        {row.trend && ` · ${observationWindowLabel(row.trend.window, row.trend.window_days)}`}
       </div>
     </li>
   );

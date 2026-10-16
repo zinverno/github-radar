@@ -155,7 +155,8 @@ async def _seed_stale(session: AsyncSession) -> None:
     now = utcnow()
     past = now - timedelta(days=40)
     older = now - timedelta(days=48)
-    await storage.sync_profile(session, Developer(github_id=42, login="octo"), now=now)
+    # This fixture is wholly stale, including the profile observation used by the anchor.
+    await storage.sync_profile(session, Developer(github_id=42, login="octo"), now=past)
 
     delta = _repo_domain(github_id=21, name="delta", stars=8, topics=("delta-topic",))
     delta_row, _ = await storage.upsert_repository(session, delta, now=now)

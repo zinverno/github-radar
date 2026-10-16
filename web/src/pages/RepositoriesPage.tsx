@@ -5,7 +5,7 @@ import { Pager } from "../components/Pager";
 import { StaleBadge } from "../components/StaleBadge";
 import { listRepositories } from "../lib/endpoints";
 import { compact, dateTime, pct } from "../lib/format";
-import { trendDisplay } from "../lib/trends";
+import { observationWindowLabel, trendDisplay } from "../lib/trends";
 import {
   REPO_SORTS,
   REPO_TRENDS,
@@ -30,6 +30,7 @@ function Row({ row }: { row: RepositorySummary }) {
           <TrendBadge
             trend={row.trend.trend}
             explanation={row.trend.explanation}
+            window={row.trend.window}
           />
         )}
         <ConfidenceBar value={row.confidence.score} level={row.confidence.level} />
@@ -40,7 +41,9 @@ function Row({ row }: { row: RepositorySummary }) {
       <div className="repo-meta">
         ★ {compact(row.stars)} · {row.primary_language ?? "unknown"} · last seen{" "}
         {dateTime(row.last_seen_at)}
-        {row.trend?.growth_pct != null ? ` · ${pct(row.trend.growth_pct)} 7d` : ""}
+        {row.trend?.growth_pct != null
+          ? ` · ${pct(row.trend.growth_pct / 100)} · ${observationWindowLabel(row.trend.window, row.trend.window_days)}`
+          : ""}
       </div>
       <div className="repo-meta">{row.description}</div>
     </li>

@@ -193,6 +193,8 @@ def serialize_trend(trend: Trend | None) -> dict[str, Any] | None:
         "explanation": trend.explanation,
         "growth_pct": _f(trend.growth_pct),
         "recency": trend.recency,
+        "window_days": trend.window_days,
+        "window": serialize_window(trend.window) if trend.window is not None else None,
     }
 
 

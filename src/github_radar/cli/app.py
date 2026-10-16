@@ -779,7 +779,7 @@ async def _repo_run(settings: Settings, *, owner: str, name: str) -> None:
             ):
                 metric_rows.append(_metric_row(f"{alias}_delta_{label}d", delta))
         _print_table(
-            ["Metric", "Value", "Window days", "Complete"], metric_rows
+            ["Metric (requested window)", "Value", "Observed days", "Complete"], metric_rows
         )
 
         if momentum is not None:
@@ -817,7 +817,7 @@ def _metric_row(name: str, delta: FieldDelta | None) -> list[object]:
     return [
         name,
         delta.delta,
-        f"{delta.window.span_days:.1f}",
+        f"{delta.window.span_days:g}",
         "yes" if delta.window.complete else "partial",
     ]
 
@@ -919,7 +919,7 @@ async def _trending_run(settings: Settings, *, limit: int) -> None:
         ranked = rank_repositories([item.report for item in tracked])
         _print_table(
             ["Repository", "Stars", "Momentum", "Stars Δ%", "Forks Δ%", "Recency",
-             "Confidence"],
+             "Confidence", "Observed days (7d requested)", "Coverage"],
             [
                 [
                     r.full_name,
@@ -929,6 +929,8 @@ async def _trending_run(settings: Settings, *, limit: int) -> None:
                     r.forks_growth_pct,
                     r.recency,
                     r.confidence,
+                    f"{r.window.span_days:g}" if r.window else "unavailable",
+                    "complete" if r.window and r.window.complete else "partial",
                 ]
                 for r in ranked[:limit]
             ],
@@ -999,7 +1001,7 @@ async def _topic_run(settings: Settings, *, topic: str, limit: int) -> None:
         ranked = rank_repositories(matched)
         _print_table(
             ["Repository", "Stars", "Momentum", "Stars Δ%", "Recency",
-             "Confidence"],
+             "Confidence", "Observed days (7d requested)", "Coverage"],
             [
                 [
                     r.full_name,
@@ -1008,6 +1010,8 @@ async def _topic_run(settings: Settings, *, topic: str, limit: int) -> None:
                     r.stars_growth_pct,
                     r.recency,
                     r.confidence,
+                    f"{r.window.span_days:g}" if r.window else "unavailable",
+                    "complete" if r.window and r.window.complete else "partial",
                 ]
                 for r in ranked[:limit]
             ],

@@ -1,5 +1,6 @@
 """Coverage diagnostics preserve missingness and expose existing model limitations."""
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -142,6 +143,9 @@ def test_partial_decline_and_sparse_high_confidence_are_exposed_without_changing
     assert sparse["confidence_7d"]["score"] == pytest.approx(0.796)
     assert result["ranking_diagnostics"]["ranked_with_partial_7d"] == 1
     assert result["ranking_diagnostics"]["high_confidence_with_fewer_than_3_snapshots"] == 1
+    assert partial["existing_trend"]["window"]["span_days"] == 0.25
+    assert partial["existing_trend"]["window"]["end"] == NOW.isoformat()
+    json.dumps(result, allow_nan=False)
 
 
 def test_small_percentage_base_can_outrank_large_absolute_growth():

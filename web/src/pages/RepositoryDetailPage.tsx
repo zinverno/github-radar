@@ -5,6 +5,7 @@ import { GithubLink, LevelTag, Property, Tag } from "../components/misc";
 import { StaleBadge } from "../components/StaleBadge";
 import { repositoryDetail } from "../lib/endpoints";
 import { compact, dateTime, pct, plain, score } from "../lib/format";
+import { observationWindowLabel } from "../lib/trends";
 import { useAsync } from "../lib/useAsync";
 
 export function RepositoryDetailPage() {
@@ -40,6 +41,7 @@ export function RepositoryDetailPage() {
             <TrendBadge
               trend={data.trend.trend}
               explanation={data.trend.explanation}
+              window={data.trend.window}
             />
           )}
           {data.stale_days != null && data.stale_days > 0 && (
@@ -106,11 +108,17 @@ export function RepositoryDetailPage() {
                 </>
               ) : null}
             </Property>
-            <Property label="Stars growth (7d)">
-              {data.stars_7d == null ? null : pct(data.trend?.growth_pct ?? null)}
+            <Property label="Observed star growth">
+              {pct(metrics.stars_7d?.growth_pct == null ? null : metrics.stars_7d.growth_pct / 100)}
             </Property>
-            <Property label="7d delta">{data.stars_7d}</Property>
-            <Property label="Stars 30d">{data.stars_30d}</Property>
+            <Property label="Star delta (7d requested)">{data.stars_7d}</Property>
+            <Property label="Star coverage (7d requested)">
+              {observationWindowLabel(metrics.stars_7d?.window, 7)}
+            </Property>
+            <Property label="Star delta (30d requested)">{data.stars_30d}</Property>
+            <Property label="Star coverage (30d requested)">
+              {observationWindowLabel(metrics.stars_30d?.window, 30)}
+            </Property>
             <Property label="Trend explanation">{data.trend?.explanation}</Property>
             <Property label="Confidence">
               {data.confidence ? (

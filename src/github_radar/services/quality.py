@@ -70,10 +70,10 @@ async def load_quality_report(
         stale_after_hours=stale_after_hours,
         top=top,
     )
-    # Match the existing developer/graph anchor, and expose its known precedence explicitly.
+    # Share the observation anchor with developer and graph reports.
     anchor = await storage.newest_observation_at(session)
     if anchor is not None and anchor > assessed_at:
-        raise ValueError("Assessment time precedes stored contributor observations")
+        raise ValueError("Assessment time precedes stored observations")
     reference = anchor or assessed_at
     graph = await load_graph(session, reference_now=reference)
     contexts = {}

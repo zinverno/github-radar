@@ -1,5 +1,5 @@
 import { trendDisplay } from "../lib/trends";
-import type { ConfidenceLevel } from "../lib/types";
+import type { ConfidenceLevel, Window } from "../lib/types";
 
 export function ConfidencePill({ level }: { level: ConfidenceLevel }) {
   return (
@@ -25,13 +25,16 @@ export function ConfidenceBar({ value, level }: { value: number; level: Confiden
 export function TrendBadge({
   trend,
   explanation,
+  window,
 }: {
   trend: string;
   explanation?: string | null;
+  window?: Window | null;
 }) {
   return (
     <span className={`pill pill-trend pill-trend-${trend}`} title={explanation ?? trendDisplay(trend)}>
       {trendDisplay(trend)}
+      {window && !window.complete ? " · partial" : ""}
     </span>
   );
 }

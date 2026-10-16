@@ -12,8 +12,11 @@ from sqlalchemy import event, select, text
 from sqlalchemy.engine import make_url
 from typer.testing import CliRunner
 
+from github_radar.api.deps import reference_now
 from github_radar.discovery.planning import load_discovery_config
+from github_radar.services.intelligence import DeveloperIntelligenceService
 from github_radar.services.quality import load_quality_report
+from github_radar.storage import repositories as storage
 from github_radar.storage.db import make_session_factory
 from github_radar.storage.models import (
     CollectionRunRow,
@@ -121,7 +124,8 @@ async def test_quality_load_is_repeatable_in_read_only_postgres_transaction(data
             assert first["collection"]["discovery"]["api_attempts_per_new_repository"] is None
 
 
-async def test_developer_history_and_existing_anchor_precedence_are_reported(database):
+@pytest.mark.parametrize("newest_source", ["repository", "profile", "contributor"])
+async def test_developer_reference_uses_newest_observation_across_sources(database, newest_source):
     rid = await seed(database, at=NOW)
     async with make_session_factory(database)() as session:
         dev = DeveloperRow(
@@ -150,16 +154,71 @@ async def test_developer_history_and_existing_anchor_precedence_are_reported(dat
                 )
             )
             session.add(DeveloperSnapshotRow(developer_id=dev.id, captured_at=at, followers=100000))
+        expected_anchor = NOW
+        if newest_source != "repository":
+            expected_anchor = NOW + timedelta(days=2)
+            if newest_source == "profile":
+                session.add(DeveloperSnapshotRow(
+                    developer_id=dev.id, captured_at=expected_anchor, followers=120000
+                ))
+            else:
+                session.add(ContributorSnapshotRow(
+                    repository_id=rid, developer_id=dev.id,
+                    captured_at=expected_anchor, contributions=10000
+                ))
+        developer_id = dev.id
         await session.commit()
     async with make_session_factory(database)() as session:
+        assert await storage.newest_observation_at(session) == expected_anchor
+        assert await reference_now(session) == expected_anchor
+        service = DeveloperIntelligenceService(session)
+        dataset = await service.load_dataset()
+        assert dataset.reference_now == expected_anchor
+        developer = service.developer_report(dataset, developer_id)
+        assert developer is not None and developer.activity is not None
         report = await load_quality_report(
+            session, catalog=load_discovery_config(SAMPLE), assessed_at=expected_anchor
+        )
+        assert report["developer_reference_at"] == expected_anchor.isoformat()
+        assert not report["developer_anchor_precedes_repository_observation"]
+        dev_report = report["developers"]["developers"][0]
+        available = newest_source == "contributor"
+        assert dev_report["observed_positive_delta_7d"] == (0 if available else None)
+        assert dev_report["activity_available"] is available
+        assert developer.activity.available is available
+        assert developer.activity.confidence_score == dev_report["activity"]["confidence_score"]
+        assert developer.emerging.confidence_score == dev_report["emerging"]["confidence_score"]
+        assert developer.emerging.label == dev_report["emerging"]["label"]
+        assert report["developers"]["with_complete_contributor_history"]["7"] == int(available)
+        assert developer.profile is not None
+        followers = developer.profile.followers_delta(7)
+        assert followers is not None
+        assert followers.delta == (20000 if newest_source == "profile" else None)
+        # Explicit observation anchors remain deterministic, including the old zero-growth window.
+        prior = await service.load_dataset(reference_now=NOW - timedelta(days=8))
+        prior_report = service.developer_report(prior, developer_id)
+        assert prior_report is not None and prior_report.activity is not None
+        assert prior_report.activity.available and prior_report.activity.total_positive_delta == 0
+        assert await service.load_dataset() == dataset
+        json.dumps(report, allow_nan=False)
+
+
+async def test_reference_with_only_profile_history_and_without_observations(database):
+    async with make_session_factory(database)() as session:
+        assert await storage.newest_observation_at(session) is None
+        dev = DeveloperRow(github_id=42, login="profile-only", first_seen_at=NOW, last_seen_at=NOW)
+        session.add(dev)
+        await session.flush()
+        session.add(DeveloperSnapshotRow(developer_id=dev.id, captured_at=NOW, followers=10))
+        await session.commit()
+        assert await storage.newest_observation_at(session) == NOW
+        dataset = await DeveloperIntelligenceService(session).load_dataset()
+        assert dataset.reference_now == NOW
+        assert not dataset.links  # A profile observation does not fabricate contributor history.
+        quality = await load_quality_report(
             session, catalog=load_discovery_config(SAMPLE), assessed_at=NOW
         )
-        assert report["developer_reference_at"] == (NOW - timedelta(days=8)).isoformat()
-        assert report["developer_anchor_precedes_repository_observation"]
-        dev_report = report["developers"]["developers"][0]
-        assert dev_report["observed_positive_delta_7d"] == 0
-        assert dev_report["activity_available"]
-        assert dev_report["profile_observations"] == dev_report["contributor_observations"] == 2
-        assert report["developers"]["with_complete_contributor_history"]["7"] == 1
-        json.dumps(report, allow_nan=False)
+        profile_only = quality["developers"]["developers"][0]
+        assert profile_only["activity"] is None
+        assert profile_only["observed_positive_delta_7d"] is None
+        assert profile_only["emerging"]["label"] == "INSUFFICIENT_HISTORY"

@@ -1,7 +1,7 @@
 """Repository trend classification and momentum-based ranking.
 
 Trend classification is deterministic and snapshot-anchored: a repository is
-labelled from its 7-day star growth, its recency against the reference instant,
+labelled from observed star growth selected for a requested 7-day window, recency,
 and how much history exists.  Every label carries its raw signals so the
 decision is explainable.
 
@@ -20,7 +20,7 @@ from github_radar.analytics.confidence import (
     RepositoryReport,
     repo_window_confidence,
 )
-from github_radar.analytics.metrics import RepoMetrics
+from github_radar.analytics.metrics import RepoMetrics, TimeWindow
 from github_radar.analytics.momentum import (
     RECENCY_HALF_LIFE_DAYS,
     WINDOW_DAYS,
@@ -50,6 +50,8 @@ class Trend:
     explanation: str
     growth_pct: float | None
     recency: float
+    window_days: int = WINDOW_DAYS
+    window: TimeWindow | None = None
 
 
 def _recency(metrics: RepoMetrics, reference_now: datetime) -> float:
@@ -69,8 +71,9 @@ def classify_trend(
     """Classify a repository's trajectory from its snapshot series.
 
     Precedence: too little history → ``new``; a strongly positive/negative
-    7-day star growth wins over recency; otherwise a stale repository is
-    ``inactive`` and everything else ``steady``.
+    observed star growth wins over recency; otherwise a stale repository is
+    ``inactive`` and everything else ``steady``. Partial-window labels describe
+    only the observed interval, not measured growth over the requested period.
     """
     recency = momentum.recency if momentum is not None else _recency(metrics, reference_now)
     if len(metrics.series) < TREND_MIN_SNAPSHOTS:
@@ -84,28 +87,37 @@ def classify_trend(
 
     growth = metrics.get("stars", WINDOW_DAYS)
     growth_pct = growth.growth_pct if growth is not None else None
+    window = growth.window if growth is not None else None
+    coverage = (
+        f"over {window.span_days:g} observed days (requested {WINDOW_DAYS} days; "
+        f"{'complete' if window.complete else 'partial'} coverage)"
+        if window is not None
+        else f"unavailable for requested {WINDOW_DAYS} days"
+    )
 
     if growth_pct is not None and growth_pct >= RISING_GROWTH_PCT:
         return Trend(
             trend="rising",
             label="Rising",
             explanation=(
-                f"7-day star growth of {growth_pct:+.2f}% is at or above "
+                f"Star growth of {growth_pct:+.2f}% {coverage} is at or above "
                 f"{RISING_GROWTH_PCT:+.0f}%."
             ),
             growth_pct=growth_pct,
             recency=recency,
+            window=window,
         )
     if growth_pct is not None and growth_pct <= DECLINING_GROWTH_PCT:
         return Trend(
             trend="declining",
             label="Declining",
             explanation=(
-                f"7-day star growth of {growth_pct:+.2f}% is at or below "
+                f"Star growth of {growth_pct:+.2f}% {coverage} is at or below "
                 f"{DECLINING_GROWTH_PCT:+.0f}%."
             ),
             growth_pct=growth_pct,
             recency=recency,
+            window=window,
         )
     if recency < INACTIVE_RECENCY:
         return Trend(
@@ -113,31 +125,35 @@ def classify_trend(
             label="Inactive",
             explanation=(
                 f"No recent push activity (recency {recency:.2f}, below "
-                f"{INACTIVE_RECENCY:.2f})."
+                f"{INACTIVE_RECENCY:.2f}). Star observations {coverage}."
             ),
             growth_pct=growth_pct,
             recency=recency,
+            window=window,
         )
     if growth_pct is None:
         return Trend(
             trend="steady",
             label="Steady",
             explanation=(
-                "No usable star baseline (zero base) and no strong recent "
-                "activity; treated as steady."
+                "Star growth percentage unavailable (missing or zero baseline); "
+                "steady is the classification fallback, not measured zero growth. "
+                f"Star observations {coverage}."
             ),
             growth_pct=None,
             recency=recency,
+            window=window,
         )
     return Trend(
         trend="steady",
         label="Steady",
         explanation=(
-            f"7-day star growth of {growth_pct:+.2f}% between "
+            f"Star growth of {growth_pct:+.2f}% {coverage} between "
             f"{DECLINING_GROWTH_PCT:+.0f}% and {RISING_GROWTH_PCT:+.0f}%."
         ),
         growth_pct=growth_pct,
         recency=recency,
+        window=window,
     )
 
 
@@ -152,6 +168,7 @@ class RepoRanking:
     forks_growth_pct: float
     recency: float
     confidence: float
+    window: TimeWindow | None = None
 
 
 def rank_repositories(
@@ -181,6 +198,7 @@ def rank_repositories(
                 confidence=repo_window_confidence(
                     report.metrics, window_days=WINDOW_DAYS
                 ).score,
+                window=report.metrics.stars_7d.window if report.metrics.stars_7d else None,
             )
         )
     ranked.sort(key=lambda r: r.score, reverse=True)
