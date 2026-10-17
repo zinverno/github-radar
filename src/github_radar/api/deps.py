@@ -32,8 +32,8 @@ def get_settings(request: Request) -> Settings:
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     """A request-scoped database session (committed/closed on completion).
 
-    The API is read-only apart from explicit AI artifact generation; routes that
-    write call ``session.commit()`` themselves before returning.
+    Explicit AI generation and authenticated workspace edits commit themselves;
+    all other routes are read-only.
     """
     factory = request.app.state.session_factory
     async with factory() as session:

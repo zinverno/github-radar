@@ -150,8 +150,11 @@ def _validation_error_handler(
 
 
 def _unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    # ServerErrorMiddleware is outside user middleware, including the private boundary.
+    private = request.url.path.startswith("/api/v1/workspace")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers={"Cache-Control": "no-store"} if private else None,
         content=error_payload(
             "internal_error",
             "An internal error occurred; the request was not completed.",

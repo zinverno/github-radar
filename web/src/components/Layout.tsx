@@ -8,6 +8,7 @@ const NAV: Array<{ to: string; label: string }> = [
   { to: "/ecosystem", label: "Ecosystem" },
   { to: "/bridges", label: "Bridges" },
   { to: "/ai", label: "AI" },
+  { to: "/workspace", label: "Workspace" },
 ];
 
 export function Layout() {

@@ -30,6 +30,12 @@ TypeScript single-page web app** that consumes it — trend pages, detail
 drill-downs, the ecosystem graph and the AI narration console (see
 `docs/WEB.md`).
 
+**Phase 7** adds a private, single-admin **networking workspace**: developer and
+repository watchlists, personal notes, relationship status, stored public contact
+links, and the existing deterministic developer intelligence. It is disabled
+until configured and supports **direct loopback access only**. See
+[workspace setup, security limits and review blockers](docs/NETWORKING_WORKSPACE.md).
+
 > github-radar is **not** a GitHub Trending scraper. It only ever talks to the
 > official GitHub REST API. The real long-term asset is its own historical
 > dataset — GitHub gives us today's state, our database remembers how things

@@ -11,6 +11,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -304,6 +305,50 @@ class AIArtifactRow(Base):
     evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
+
+
+class WorkspaceFields:
+    """Private single-admin state, kept out of public entity relationships."""
+
+    saved: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    notes: Mapped[str] = mapped_column(Text, nullable=False)
+    relationship_status: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceDeveloperRow(WorkspaceFields, Base):
+    __tablename__ = "workspace_developers"
+    __table_args__ = (
+        CheckConstraint("length(notes) <= 10000", name="ck_workspace_developer_notes"),
+        CheckConstraint("length(version) = 32", name="ck_workspace_developer_version"),
+        CheckConstraint(
+            "relationship_status IN "
+            "('interested','contacted','connected','collaborating','paused')",
+            name="ck_workspace_developer_status",
+        ),
+    )
+    entity_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("developers.id", ondelete="CASCADE"), primary_key=True,
+        autoincrement=False,
+    )
+
+
+class WorkspaceRepositoryRow(WorkspaceFields, Base):
+    __tablename__ = "workspace_repositories"
+    __table_args__ = (
+        CheckConstraint("length(notes) <= 10000", name="ck_workspace_repository_notes"),
+        CheckConstraint("length(version) = 32", name="ck_workspace_repository_version"),
+        CheckConstraint(
+            "relationship_status IN "
+            "('interested','contacted','connected','collaborating','paused')",
+            name="ck_workspace_repository_status",
+        ),
+    )
+    entity_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("repositories.id", ondelete="CASCADE"), primary_key=True,
+        autoincrement=False,
+    )
 
 
 class CollectionRunRow(Base):

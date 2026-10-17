@@ -16,6 +16,7 @@ from github_radar.api.routes.repositories import router as repositories_router
 from github_radar.api.routes.search import router as search_router
 from github_radar.api.routes.status import router as status_router
 from github_radar.api.routes.topics import router as topics_router
+from github_radar.api.routes.workspace import router as workspace_router
 
 api_router = APIRouter()
 api_router.include_router(status_router)
@@ -26,5 +27,6 @@ api_router.include_router(ecosystem_router)
 api_router.include_router(bridges_router)
 api_router.include_router(search_router)
 api_router.include_router(ai_router)
+api_router.include_router(workspace_router)
 
 __all__ = ["api_router"]

@@ -12,6 +12,12 @@ There is no separate web server: `uv run github-radar serve` binds one port
 that serves the SPA (`/`), the API (`/api/v1`) and the interactive API console
 (`/api/v1/docs`).
 
+Phase 7 adds `/workspace/developers` and `/workspace/repositories`, backed by
+authenticated `/api/v1/workspace/*` routes. These are private and disabled by
+default; the public intelligence routes do not include notes or watchlist state.
+See [Networking Workspace](NETWORKING_WORKSPACE.md) for setup, API contracts,
+the direct-loopback restriction and release blockers.
+
 ## API contract
 
 - **Mounting.** Everything lives under `/api/v1`. OpenAPI: `/api/v1/openapi.json`,

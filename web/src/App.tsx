@@ -1,4 +1,4 @@
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Layout } from "./components/Layout";
 import { AiPage } from "./pages/AiPage";
@@ -12,6 +12,8 @@ import { RepositoriesPage } from "./pages/RepositoriesPage";
 import { RepositoryDetailPage } from "./pages/RepositoryDetailPage";
 import { TopicDetailPage } from "./pages/TopicDetailPage";
 import { TopicsPage } from "./pages/TopicsPage";
+import { WorkspaceLayout } from "./pages/WorkspaceLayout";
+import { WorkspacePage } from "./pages/WorkspacePage";
 
 export function App() {
   return (
@@ -27,6 +29,11 @@ export function App() {
         <Route path="ecosystem" element={<EcosystemPage />} />
         <Route path="bridges" element={<BridgesPage />} />
         <Route path="ai" element={<AiPage />} />
+        <Route path="workspace" element={<WorkspaceLayout />}>
+          <Route index element={<Navigate to="developers" replace />} />
+          <Route path="developers" element={<WorkspacePage key="developers" kind="developers" />} />
+          <Route path="repositories" element={<WorkspacePage key="repositories" kind="repositories" />} />
+        </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>

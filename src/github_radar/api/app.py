@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from github_radar.api.errors import register_exception_handlers
 from github_radar.api.routes import api_router
+from github_radar.api.workspace_access import PRIVATE_HEADERS, WorkspaceAccess
 from github_radar.config import Settings
 from github_radar.storage.db import make_engine, make_session_factory
 
@@ -70,10 +71,12 @@ def _spa_fallback(dist_dir: Path) -> Any:
             )
         candidate = (dist_dir / path).resolve()
         if path and candidate.is_file() and candidate.is_relative_to(dist_dir):
-            return FileResponse(candidate)
+            return FileResponse(
+                candidate, headers=PRIVATE_HEADERS if candidate.suffix == ".html" else None,
+            )
         if index_path.is_file():
-            return FileResponse(index_path)
-        return HTMLResponse(_day0_placeholder(), status_code=503)
+            return FileResponse(index_path, headers=PRIVATE_HEADERS)
+        return HTMLResponse(_day0_placeholder(), status_code=503, headers=PRIVATE_HEADERS)
 
     return fallback
 
@@ -135,6 +138,7 @@ def create_app(
     app.state.web_dist = dist
 
     register_exception_handlers(app)
+    app.add_middleware(WorkspaceAccess, token=settings.workspace_admin_token.get_secret_value())
     app.include_router(api_router, prefix="/api/v1")
 
     assets_dir = dist / "assets"

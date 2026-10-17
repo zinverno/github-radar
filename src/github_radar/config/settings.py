@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from github_radar.util import utcnow
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         validate_assignment=True,
+        hide_input_in_errors=True,
     )
 
     # Required for anything that talks to the GitHub API.
@@ -81,6 +82,19 @@ class Settings(BaseSettings):
     ai_max_evidence_chars: int = 12000
 
     log_level: str = "INFO"
+
+    # Empty disables the private workspace; this token never enables remote access.
+    workspace_admin_token: SecretStr = SecretStr("")
+
+    @field_validator("workspace_admin_token")
+    @classmethod
+    def _validate_workspace_token(cls, value: SecretStr) -> SecretStr:
+        import re
+
+        token = value.get_secret_value()
+        if token and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+            raise ValueError("Workspace token must be 32–256 URL-safe ASCII characters")
+        return value
 
     @field_validator("database_url")
     @classmethod

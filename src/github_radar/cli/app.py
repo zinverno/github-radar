@@ -2979,6 +2979,10 @@ def serve_command(
 
     import uvicorn
 
+    if settings.workspace_admin_token.get_secret_value() and host not in ("127.0.0.1", "::1"):
+        typer.secho("Private workspace requires --host 127.0.0.1 or ::1.", err=True)
+        raise typer.Exit(code=1)
+
     typer.secho(
         f"Serving github-radar API on http://{host}:{port}/api/v1 "
         f"(docs at /api/v1/docs).",
@@ -2990,6 +2994,7 @@ def serve_command(
         host=host,
         port=port,
         log_level=settings.log_level.lower(),
+        proxy_headers=False,
     )
 
 

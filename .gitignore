@@ -18,6 +18,12 @@ venv/
 .env.*
 !.env.example
 
+# Private database backups (keep the backup directory outside Git)
+*.dump
+*.backup
+*.sql.gz
+/backups/
+
 # Test / tooling caches
 .pytest_cache/
 .ruff_cache/
