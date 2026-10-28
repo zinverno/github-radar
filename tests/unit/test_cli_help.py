@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+from rich.text import Text
+from typer import rich_utils
+from typer.core import TyperGroup, TyperOption
+from typer.main import get_command
 from typer.testing import CliRunner, Result
 
 from github_radar.cli.app import app
@@ -43,6 +48,19 @@ def _invoke(command: str) -> Result:
     return runner.invoke(app, command.split("__") + ["--help"])
 
 
+def _visible_options(command: str) -> set[str]:
+    registered = get_command(app)
+    for name in command.split("__"):
+        assert isinstance(registered, TyperGroup)
+        registered = registered.commands[name]
+    return {
+        flag
+        for parameter in registered.params
+        if isinstance(parameter, TyperOption) and not parameter.hidden and parameter.help
+        for flag in parameter.opts + parameter.secondary_opts
+    }
+
+
 def test_all_commands_available() -> None:
     for command in (
         PHASE1_COMMANDS
@@ -81,7 +99,7 @@ def test_developers_help_renders() -> None:
     result = runner.invoke(app, ["developers", "--help"])
     assert result.exit_code == 0
     assert "List tracked developers with their intelligence scores" in result.output
-    assert "--has-public-contact" in result.output
+    assert "--has-public-contact" in _visible_options("developers")
 
 
 def test_developer_help_renders() -> None:
@@ -106,8 +124,7 @@ def test_graph_bridges_develop_help_renders() -> None:
     result = runner.invoke(app, ["graph", "bridges", "develop", "--help"])
     assert result.exit_code == 0
     assert "bridge" in result.output.lower()
-    assert "--min-confidence" in result.output
-    assert "--login" in result.output
+    assert {"--min-confidence", "--login"} <= _visible_options("graph__bridges__develop")
 
 
 def test_graph_group_still_lists_bridges() -> None:
@@ -147,7 +164,7 @@ def test_ecosystem_help_mentions_graph() -> None:
     result = runner.invoke(app, ["ecosystem", "--help"])
     assert result.exit_code == 0
     assert "ecosystem graph" in result.output
-    assert "--centrality-limit" in result.output
+    assert "--centrality-limit" in _visible_options("ecosystem")
 
 
 def test_related_commands_help_mentions_graph_footprint() -> None:
@@ -169,10 +186,39 @@ def test_ai_group_help_lists_subcommands() -> None:
 def test_ai_repo_help_renders_filter_options() -> None:
     result = runner.invoke(app, ["ai", "repo", "--help"])
     assert result.exit_code == 0
-    assert "--window" in result.output
-    assert "--trend" in result.output
-    assert "--json" in result.output
-    assert "--force" in result.output
+    assert {"--window", "--trend", "--json", "--force"} <= _visible_options("ai__repo")
+
+
+@pytest.mark.parametrize(
+    ("command", "options"),
+    [
+        ("developers", {"--has-public-contact"}),
+        ("graph__bridges__develop", {"--min-confidence", "--login"}),
+        ("ecosystem", {"--centrality-limit"}),
+        ("ai__repo", {"--window", "--trend", "--json", "--force"}),
+    ],
+)
+@pytest.mark.parametrize("width", [40, 80, 120])
+@pytest.mark.parametrize("color", [False, True])
+def test_option_help_at_terminal_sizes(
+    command: str, options: set[str], width: int, color: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    # Typer caches these settings at import; GITHUB_ACTIONS forces terminal styling.
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", color)
+    monkeypatch.setattr(rich_utils, "MAX_WIDTH", width)
+    result = _invoke(command)
+    assert result.exit_code == 0, result.output
+    assert ("\x1b[" in result.output) is color
+    help_text = Text.from_ansi(result.output).plain
+    assert "Usage:" in help_text
+    assert "Options" in help_text
+    assert options <= _visible_options(command)
+    # Narrow Rich tables can wrap/truncate names; ordinary widths must display them.
+    if width >= 80:
+        for option in options:
+            assert option in help_text
 
 
 def test_ai_status_help_renders() -> None:
