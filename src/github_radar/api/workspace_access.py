@@ -6,6 +6,7 @@ import ipaddress
 import secrets
 from urllib.parse import urlsplit
 
+from starlette._utils import get_route_path
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -80,10 +81,14 @@ class WorkspaceAccess:
         return None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        path = scope.get("path", "")
-        private_api = path == "/api/v1/workspace" or path.startswith("/api/v1/workspace/")
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = get_route_path(scope)
+        private_api = (path == "/api/v1/workspace" or path.startswith("/api/v1/workspace/")
+                       or path == "/api/v1/ai/generate")
         shell = path == "/workspace" or path.startswith("/workspace/")
-        if scope["type"] != "http" or not (private_api or shell):
+        if not (private_api or shell):
             await self.app(scope, receive, send)
             return
 

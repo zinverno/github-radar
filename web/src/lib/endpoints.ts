@@ -195,11 +195,16 @@ export function generateArtifact(options: {
   artifactType?: string;
   window?: WindowDays;
   force?: boolean;
-}): Promise<AiGenerateResult> {
+}, adminToken: string): Promise<AiGenerateResult> {
   const { entityType, entityKey, artifactType, window = "7d", force = false } = options;
+  const topics = entityType === "bridge" ? entityKey?.trim().split(/\s+/) : undefined;
   return api(
-    `/ai/generate${params({ entityType, entityKey, artifactType, window, force })}`,
-    { method: "POST" },
+    `/ai/generate${params({ entity_type: entityType, entity_key: entityKey,
+      artifact_type: artifactType, window, force,
+      topic_a: topics?.length === 2 ? topics[0] : undefined,
+      topic_b: topics?.length === 2 ? topics[1] : undefined })}`,
+    { method: "POST", credentials: "omit", cache: "no-store", redirect: "error",
+      headers: { Authorization: `Bearer ${adminToken}` } },
   );
 }
 

@@ -2979,13 +2979,13 @@ def serve_command(
 
     import uvicorn
 
-    if settings.workspace_admin_token.get_secret_value() and host not in ("127.0.0.1", "::1"):
-        typer.secho("Private workspace requires --host 127.0.0.1 or ::1.", err=True)
+    if settings.deployment_mode == "local" and host not in ("127.0.0.1", "::1"):
+        typer.secho("Local mode requires --host 127.0.0.1 or ::1.", err=True)
         raise typer.Exit(code=1)
 
     typer.secho(
         f"Serving github-radar API on http://{host}:{port}/api/v1 "
-        f"(docs at /api/v1/docs).",
+        f"({settings.deployment_mode} mode).",
         fg=typer.colors.GREEN,
     )
     uvicorn.run(
@@ -2995,6 +2995,9 @@ def serve_command(
         port=port,
         log_level=settings.log_level.lower(),
         proxy_headers=False,
+        access_log=False,
+        limit_concurrency=20 if settings.deployment_mode == "public" else None,
+        backlog=64 if settings.deployment_mode == "public" else 2048,
     )
 
 

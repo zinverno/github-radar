@@ -19,7 +19,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from github_radar.api.deployment import DeploymentBoundary
 from github_radar.api.errors import register_exception_handlers
+from github_radar.api.readiness import database_ready
 from github_radar.api.routes import api_router
 from github_radar.api.workspace_access import PRIVATE_HEADERS, WorkspaceAccess
 from github_radar.config import Settings
@@ -114,22 +116,32 @@ def create_app(
     resolved_factory = session_factory
     if resolved_factory is None:
         if resolved_engine is None:
-            resolved_engine = make_engine(settings.require_database_url())
+            resolved_engine = make_engine(
+                settings.require_database_url(), public=settings.deployment_mode == "public",
+            )
         resolved_factory = make_session_factory(resolved_engine)
 
     dist = web_dist if web_dist is not None else _DEFAULT_WEB_DIST
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        yield
-        if owned_engine and resolved_engine is not None:
-            await resolved_engine.dispose()
+        try:
+            if settings.deployment_mode == "public":
+                if not (dist / "index.html").is_file():
+                    raise RuntimeError("Public mode requires a built frontend")
+                if not await database_ready(resolved_factory, public=True):
+                    raise RuntimeError("Public readiness failed; check schema and role grants")
+            yield
+        finally:
+            if owned_engine and resolved_engine is not None:
+                await resolved_engine.dispose()
 
     app = FastAPI(
         title="github-radar API",
         version="0.1.0",
-        docs_url="/api/v1/docs",
-        openapi_url="/api/v1/openapi.json",
+        docs_url="/api/v1/docs" if settings.deployment_mode == "local" else None,
+        redoc_url="/redoc" if settings.deployment_mode == "local" else None,
+        openapi_url="/api/v1/openapi.json" if settings.deployment_mode == "local" else None,
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -139,6 +151,8 @@ def create_app(
 
     register_exception_handlers(app)
     app.add_middleware(WorkspaceAccess, token=settings.workspace_admin_token.get_secret_value())
+    app.add_middleware(DeploymentBoundary, public=settings.deployment_mode == "public",
+                       hosts=settings.public_allowed_hosts)
     app.include_router(api_router, prefix="/api/v1")
 
     assets_dir = dist / "assets"

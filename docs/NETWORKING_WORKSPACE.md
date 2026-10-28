@@ -221,3 +221,10 @@ Scoring, discovery catalogs/algorithms, collection ownership/budgets, stored
 observations and prior migration history are unchanged. StoryOps was not modified.
 The operator performed the application migration. Finalization used read-only
 local checks; no live GitHub collection, deployment or push was performed.
+
+## Public deployment mode (Phase 8A)
+
+`DEPLOYMENT_MODE=public` refuses workspace credentials and all workspace routes,
+regardless of proxy or bearer claims. The local direct-loopback boundary remains
+required. Local HTTP AI generation now uses the same admin boundary; public mode
+disables the entire AI API. See [production readiness](PRODUCTION_READINESS.md).

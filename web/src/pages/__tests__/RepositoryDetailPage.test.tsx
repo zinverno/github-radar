@@ -44,8 +44,7 @@ describe("RepositoryDetailPage observation coverage", () => {
     async (days, change) => {
       vi.spyOn(endpoints, "repositoryDetail").mockResolvedValue(detail(days, change));
       render(
-        <MemoryRouter initialEntries={["/repositories/octo/one"]}
-          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <MemoryRouter initialEntries={["/repositories/octo/one"]}>
           <Routes><Route path="/repositories/:owner/:name" element={<RepositoryDetailPage />} /></Routes>
         </MemoryRouter>,
       );

@@ -6,7 +6,6 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
-from fastapi.routing import APIRoute
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -320,13 +319,15 @@ async def test_disabled_default_guards_every_registered_private_endpoint(monkeyp
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH,
     ) as client:
-        for route in app.routes:
-            if not isinstance(route, APIRoute) or not route.path.startswith(PREFIX):
-                continue
-            assert route.methods
+        paths = app.openapi()["paths"]
+        private_paths = {
+            path: methods for path, methods in paths.items() if path.startswith(PREFIX)
+        }
+        assert len(private_paths) == 4
+        for registered, methods in private_paths.items():
             for kind in ("developers", "repositories"):
-                path = route.path.replace("{kind}", kind).replace("{entity_id}", "1")
-                for method in route.methods:
+                path = registered.replace("{kind}", kind).replace("{entity_id}", "1")
+                for method in methods:
                     result = await client.request(method, path, content=b"invalid JSON")
                     assert result.status_code == 503, (method, path)
                     assert result.json()["error"]["code"] == "workspace_disabled"

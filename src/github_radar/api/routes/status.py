@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from github_radar.analytics.trends import rank_repositories
@@ -20,6 +21,7 @@ from github_radar.api.dataset import (
 )
 from github_radar.api.deps import get_session, get_settings, reference_now
 from github_radar.api.pagination import MAX_LIMIT
+from github_radar.api.readiness import database_ready
 from github_radar.api.serializers import (
     graph_counts,
     serialize_developer_bridge,
@@ -43,6 +45,22 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/ready", summary="Database and schema readiness")
+async def ready(request: Request) -> JSONResponse:
+    available = await database_ready(
+        request.app.state.session_factory,
+        public=request.app.state.settings.deployment_mode == "public",
+    )
+    return JSONResponse({"status": "ready" if available else "not_ready"},
+                        status_code=200 if available else 503,
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.get("/capabilities", summary="Deployment capabilities without secrets")
+async def capabilities(settings: Annotated[Settings, Depends(get_settings)]) -> dict[str, str]:
+    return {"mode": settings.deployment_mode}
+
+
 def _ai_configured(settings: Settings) -> tuple[bool, str | None]:
     try:
         base_url = settings.require_ai_config()[0]
@@ -50,7 +68,7 @@ def _ai_configured(settings: Settings) -> tuple[bool, str | None]:
         return False, None
     from urllib.parse import urlparse
 
-    host = urlparse(base_url).netloc or base_url
+    host = urlparse(base_url).hostname
     return True, host
 
 
@@ -64,7 +82,8 @@ async def status(
 
     stats = await storage.compute_stats(session)
     ai_configured, ai_host = _ai_configured(settings)
-    artifact_stats = await SqlArtifactStore(session).stats()
+    public = settings.deployment_mode == "public"
+    artifact_stats = {} if public else await SqlArtifactStore(session).stats()
     return {
         "reference_time": (await storage.newest_observation_at(session) or utcnow()).isoformat(),
         "freshness": await freshness(session),
@@ -83,7 +102,7 @@ async def status(
         "ai": {
             "configured": ai_configured,
             "base_url_host": ai_host,
-            "model": settings.ai_model or None,
+            "model": None if public else settings.ai_model or None,
             "per_run_request_cap": settings.ai_max_requests_per_run,
             "max_output_tokens": settings.ai_max_output_tokens,
             "max_evidence_chars": settings.ai_max_evidence_chars,

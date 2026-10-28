@@ -102,7 +102,7 @@ async def ai_status(
     stats = await SqlArtifactStore(session).stats()
     return {
         "configured": configured,
-        "base_url_host": urlparse(base_url).netloc or base_url if configured else None,
+        "base_url_host": urlparse(base_url).hostname if configured else None,
         "model": settings.ai_model or None,
         "per_run_request_cap": settings.ai_max_requests_per_run,
         "max_output_tokens": settings.ai_max_output_tokens,

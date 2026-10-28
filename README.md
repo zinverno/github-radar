@@ -366,8 +366,12 @@ explicit command. All preserve observations at other timestamps.
 
 ### Run it
 
+Use Node 22.12+ (22.x) or a supported Node LTS >=24 with npm 11.11.0.
+Install scripts are disabled by default; see the
+[frontend dependency security review](docs/FRONTEND_SECURITY_REVIEW.md).
+
 ```bash
-cd web && npm install && npm run build     # build the SPA into web/dist
+cd web && npm ci && npm run build          # build the locked SPA into web/dist
 cd .. && uv run github-radar serve         # http://127.0.0.1:8000
 ```
 
@@ -458,3 +462,6 @@ uv run mypy .
 ## License
 
 MIT (pending — see `pyproject.toml`).
+
+Production readiness and public read-only mode: [Phase 8A review](docs/PRODUCTION_READINESS.md).
+Public deployment remains blocked pending the documented release gates.

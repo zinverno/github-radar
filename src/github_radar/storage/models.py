@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     Text,
     UniqueConstraint,
 )
@@ -123,7 +124,7 @@ class TopicRow(Base):
 class RepositoryTopicRow(Base):
     __tablename__ = "repository_topics"
     __table_args__ = (
-        UniqueConstraint("repository_id", "topic_id", name="uq_repository_topics"),
+        PrimaryKeyConstraint("repository_id", "topic_id", name="uq_repository_topics"),
     )
 
     repository_id: Mapped[int] = mapped_column(
@@ -137,7 +138,7 @@ class RepositoryTopicRow(Base):
 class ContributorRow(Base):
     __tablename__ = "repository_contributors"
     __table_args__ = (
-        UniqueConstraint(
+        PrimaryKeyConstraint(
             "repository_id", "developer_id", name="uq_repository_contributors"
         ),
         Index("ix_repository_contributors_repo_contributions",
