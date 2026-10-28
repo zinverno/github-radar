@@ -66,6 +66,7 @@ jobs:
             fi
             sleep 1
           done
+          echo "PostgreSQL did not become ready after ${attempt} attempts" >&2
           exit 1
       - run: uv run ruff check .
       - run: uv run mypy src tests
