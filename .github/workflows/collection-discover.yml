@@ -1,0 +1,106 @@
+name: Scheduled discovery
+on:
+  schedule:
+    - cron: '43 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      live:
+        description: 'Execute only when both operator activation gates are enabled'
+        type: boolean
+        default: false
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: github-radar-collection
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: github.repository == 'zinverno/github-radar' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    outputs:
+      live: ${{ steps.gate.outputs.live }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.11.6
+      - run: uv sync --frozen --no-dev
+      - name: Secret-free plan and activation decision
+        id: gate
+        env:
+          JOB_ENABLED: ${{ vars.RADAR_DISCOVERY_ENABLED }}
+          LIVE_ENABLED: ${{ vars.RADAR_COLLECTION_LIVE }}
+          LIVE_REQUESTED: ${{ github.event_name == 'schedule' || inputs.live }}
+        run: |
+          uv run --frozen --no-dev github-radar automation run discover > "$RUNNER_TEMP/collection-plan.json"
+          python - <<'PY'
+          import os
+          live = (os.environ.get("JOB_ENABLED") == "true"
+                  and os.environ.get("LIVE_ENABLED") == "true"
+                  and os.environ.get("LIVE_REQUESTED") == "true"
+                  and os.environ.get("GITHUB_RUN_ATTEMPT") == "1")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write(f"live={str(live).lower()}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("Collection decision: " + ("LIVE requested" if live else
+                           "SKIPPED / dry-run: activation gates closed or rerun refused") + "\n")
+          PY
+          cat "$RUNNER_TEMP/collection-plan.json"
+  collect:
+    needs: plan
+    if: needs.plan.outputs.live == 'true' && github.repository == 'zinverno/github-radar' && github.ref == 'refs/heads/main'
+    environment: collection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.11.6
+      - run: uv sync --frozen --no-dev
+      - name: Bounded collection (no whole-run retry)
+        id: collection
+        shell: bash
+        env:
+          RADAR_COLLECTION_LIVE: ${{ vars.RADAR_COLLECTION_LIVE }}
+          RADAR_REFRESH_ENABLED: ${{ vars.RADAR_REFRESH_ENABLED }}
+          RADAR_DISCOVERY_ENABLED: ${{ vars.RADAR_DISCOVERY_ENABLED }}
+          RADAR_DISCOVERY_PLAN_SHA256: ${{ vars.RADAR_DISCOVERY_PLAN_SHA256 }}
+          COLLECTOR_DIRECT_CONNECTION: ${{ vars.COLLECTOR_DIRECT_CONNECTION }}
+          COLLECTOR_ACK_UNFINISHED_RUNS: ${{ vars.COLLECTOR_ACK_UNFINISHED_RUNS }}
+          COLLECTOR_DATABASE_URL: ${{ secrets.COLLECTOR_DATABASE_URL }}
+          COLLECTOR_GITHUB_TOKEN: ${{ secrets.COLLECTOR_GITHUB_TOKEN }}
+          COLLECTOR_CA_PEM: ${{ secrets.COLLECTOR_CA_PEM }}
+        run: uv run --frozen --no-dev github-radar automation run discover --live | tee "$RUNNER_TEMP/collection-result.json"
+      - name: Read-only operator diagnostics
+        if: always() && steps.collection.outcome != 'skipped'
+        env:
+          RADAR_COLLECTION_LIVE: ${{ vars.RADAR_COLLECTION_LIVE }}
+          RADAR_REFRESH_ENABLED: ${{ vars.RADAR_REFRESH_ENABLED }}
+          RADAR_DISCOVERY_ENABLED: ${{ vars.RADAR_DISCOVERY_ENABLED }}
+          RADAR_DISCOVERY_PLAN_SHA256: ${{ vars.RADAR_DISCOVERY_PLAN_SHA256 }}
+          COLLECTOR_DIRECT_CONNECTION: ${{ vars.COLLECTOR_DIRECT_CONNECTION }}
+          COLLECTOR_ACK_UNFINISHED_RUNS: ${{ vars.COLLECTOR_ACK_UNFINISHED_RUNS }}
+          COLLECTOR_DATABASE_URL: ${{ secrets.COLLECTOR_DATABASE_URL }}
+          COLLECTOR_GITHUB_TOKEN: ${{ secrets.COLLECTOR_GITHUB_TOKEN }}
+          COLLECTOR_CA_PEM: ${{ secrets.COLLECTOR_CA_PEM }}
+        run: |
+          uv run --frozen --no-dev github-radar automation status > "$RUNNER_TEMP/collection-status.json"
+          cat "$RUNNER_TEMP/collection-status.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Execution outcome (also on failure or cancellation)
+        if: always()
+        env:
+          COLLECTION_OUTCOME: ${{ steps.collection.outcome }}
+        run: |
+          printf 'Collection step outcome: %s\n' "$COLLECTION_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          if test -f "$RUNNER_TEMP/collection-result.json"; then
+            cat "$RUNNER_TEMP/collection-result.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
