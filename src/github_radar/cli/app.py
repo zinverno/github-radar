@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -87,6 +88,7 @@ from github_radar.analytics import (
     rank_repositories,
 )
 from github_radar.analytics.trends import classify_trend
+from github_radar.cli.automation import app as automation_app
 from github_radar.cli.collection import app as collection_app
 from github_radar.config import Settings, SettingsError, get_settings
 from github_radar.config.settings import GitHubRequestLimits
@@ -154,6 +156,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(collection_app, name="collection")
+app.add_typer(automation_app, name="automation")
 
 
 # ---------------------------------------------------------------------------
@@ -3002,8 +3005,10 @@ def serve_command(
 
 
 def main() -> None:
+    # Automation must not load application .env credentials or enable debug transport logs.
+    level = logging.WARNING if sys.argv[1:2] == ["automation"] else get_settings().log_level.upper()
     logging.basicConfig(
-        level=get_settings().log_level.upper(),
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     app()

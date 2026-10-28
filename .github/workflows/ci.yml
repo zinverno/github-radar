@@ -9,6 +9,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  workflows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate workflow YAML and expressions (no collection secrets)
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
   python:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -60,6 +69,10 @@ jobs:
           exit 1
       - run: uv run ruff check .
       - run: uv run mypy src tests
+      - name: Secret-free scheduling previews (no database or GitHub requests)
+        run: |
+          uv run --frozen github-radar automation run refresh
+          uv run --frozen github-radar automation run discover
       - name: Python unit and guarded PostgreSQL tests (no live GitHub)
         run: uv run pytest -q
       - name: Validate migration head and full recovery on disposable databases

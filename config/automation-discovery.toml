@@ -1,0 +1,49 @@
+# Activation requires operator review of this whole file and its SHA-256 digest.
+# Same catalog contract as discover-plan; no arbitrary workflow query inputs.
+limit_per_cohort = 2
+per_page = 100
+contributors_limit = 0
+
+[budget]
+total = 36
+search = 12
+repository_details = 24
+contributors = 0
+profiles = 0
+
+[execution]
+max_candidates = 18
+max_new_repositories = 10
+max_repositories = 10
+max_seconds = 300
+
+[[categories]]
+name = "ai-agents"
+query = "topic:ai-agents"
+
+[[categories]]
+name = "developer-tools"
+query = "topic:developer-tools"
+
+[[categories]]
+name = "data-engineering"
+query = "topic:data-engineering"
+
+[[recipes]]
+name = "established"
+min_stars = 1000
+sort = "stars"
+
+[[recipes]]
+name = "recent"
+min_stars = 10
+max_stars = 999
+created_within_days = 365
+sort = "updated"
+
+[[recipes]]
+name = "recently-active"
+min_stars = 10
+max_stars = 999
+pushed_within_days = 30
+sort = "updated"
