@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Layout } from "./components/Layout";
+import { LocalOnly } from "./components/LocalOnly";
 import { AiPage } from "./pages/AiPage";
 import { BridgesPage } from "./pages/BridgesPage";
 import { DeveloperDetailPage } from "./pages/DeveloperDetailPage";
@@ -28,8 +29,8 @@ export function App() {
         <Route path="developers/:login" element={<DeveloperDetailPage />} />
         <Route path="ecosystem" element={<EcosystemPage />} />
         <Route path="bridges" element={<BridgesPage />} />
-        <Route path="ai" element={<AiPage />} />
-        <Route path="workspace" element={<WorkspaceLayout />}>
+        <Route path="ai" element={<LocalOnly><AiPage /></LocalOnly>} />
+        <Route path="workspace" element={<LocalOnly><WorkspaceLayout /></LocalOnly>}>
           <Route index element={<Navigate to="developers" replace />} />
           <Route path="developers" element={<WorkspacePage key="developers" kind="developers" />} />
           <Route path="repositories" element={<WorkspacePage key="repositories" kind="repositories" />} />

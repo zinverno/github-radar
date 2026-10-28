@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { EmptyState, ErrorState, Loading } from "../components/basic";
 import { LevelTag } from "../components/misc";
 import { aiArtifacts, aiStatus, generateArtifact } from "../lib/endpoints";
@@ -38,8 +38,14 @@ export function AiPage() {
   const [entityKey, setEntityKey] = useState("");
   const [window, setWindow] = useState<WindowDays>("7d");
   const [busy, setBusy] = useState(false);
+  const [adminToken, setAdminToken] = useState("");
   const [generated, setGenerated] = useState<AiArtifact | null>(null);
   const [generateError, setGenerateError] = useState<Error | null>(null);
+  useEffect(() => {
+    const clearToken = () => setAdminToken("");
+    globalThis.addEventListener("pagehide", clearToken);
+    return () => globalThis.removeEventListener("pagehide", clearToken);
+  }, []);
 
   const { data: status, error: statusError, loading: statusLoading } = useAsync(
     "ai-status",
@@ -60,7 +66,7 @@ export function AiPage() {
         entityType,
         entityKey: needsKey && entityKey.trim() ? entityKey.trim() : undefined,
         window,
-      });
+      }, adminToken);
       setGenerated(result.artifact);
       reload();
     } catch (err) {
@@ -68,6 +74,7 @@ export function AiPage() {
         err instanceof ApiError ? err : (err as Error),
       );
     } finally {
+      setAdminToken("");
       setBusy(false);
     }
   };
@@ -157,6 +164,9 @@ export function AiPage() {
               </label>
             )}
             {entityType === "bridge" && <p className="muted">Key format: topicA topicB</p>}
+            <label>Local admin token<input type="password" autoComplete="off" required
+              minLength={32} maxLength={256} value={adminToken}
+              onChange={event => setAdminToken(event.target.value)} /></label>
             <label>
               Window
               <select value={window} onChange={(event) => setWindow(event.target.value as WindowDays)}>

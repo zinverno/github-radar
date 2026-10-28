@@ -502,12 +502,18 @@ async def test_ai_status_unconfigured_and_reads_are_free(
 
 
 async def test_ai_generate_refuses_when_unconfigured(
-    client: httpx.AsyncClient,
+    engine: AsyncEngine,
 ) -> None:
-    response = await client.post(
-        "/api/v1/ai/generate",
-        params={"entity_type": "repository", "entity_key": "octo/alpha"},
-    )
+    from tests.unit.test_workspace import AUTH, workspace_settings
+
+    app = create_app(workspace_settings(), engine=engine)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers=AUTH,
+    ) as client:
+        response = await client.post(
+            "/api/v1/ai/generate",
+            params={"entity_type": "repository", "entity_key": "octo/alpha"},
+        )
     assert response.status_code == 503
     assert _error_shape(response.json()) == "ai_configuration_error"
 

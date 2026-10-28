@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from github_radar.util import utcnow
@@ -43,10 +44,32 @@ class Settings(BaseSettings):
     )
 
     # Required for anything that talks to the GitHub API.
-    github_token: str = ""
+    github_token: str = Field(default="", repr=False)
 
     # Required for anything that touches the database.
-    database_url: str = ""
+    database_url: str = Field(default="", repr=False)
+
+    deployment_mode: Literal["local", "public"] = "local"
+    public_allowed_hosts: tuple[str, ...] = ()
+
+    @field_validator("public_allowed_hosts")
+    @classmethod
+    def _validate_public_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        import re
+
+        if any(not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", host) for host in value):
+            raise ValueError("PUBLIC_ALLOWED_HOSTS requires exact lowercase hostnames, no ports")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_deployment(self) -> Settings:
+        if self.deployment_mode == "public":
+            if not self.public_allowed_hosts:
+                raise ValueError("Public mode requires PUBLIC_ALLOWED_HOSTS")
+            credentials = self.github_token or self.ai_api_key
+            if credentials or self.workspace_admin_token.get_secret_value():
+                raise ValueError("Public mode must not contain GitHub, AI or workspace credentials")
+        return self
 
     # GitHub API.
     github_api_base_url: str = "https://api.github.com"
@@ -72,7 +95,7 @@ class Settings(BaseSettings):
     search_per_page: int = Field(default=100, ge=1, le=100)
 
     # LLM provider (OpenAI-compatible chat completions API).
-    ai_api_key: str = ""
+    ai_api_key: str = Field(default="", repr=False)
     ai_base_url: str = "https://api.openai.com/v1"
     ai_model: str = ""
     ai_timeout_seconds: float = 60.0
@@ -99,11 +122,15 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _validate_database_url(cls, value: str) -> str:
-        if value and "postgresql+asyncpg://" not in value:
-            raise ValueError(
-                "DATABASE_URL must use the postgresql+asyncpg:// scheme, "
-                f"got {value!r}"
-            )
+        if value and not value.startswith("postgresql+asyncpg://"):
+            raise ValueError("DATABASE_URL must use the postgresql+asyncpg:// scheme")
+        if value:
+            from sqlalchemy.engine import make_url
+
+            try:
+                make_url(value)
+            except Exception:
+                raise ValueError("DATABASE_URL is not a valid PostgreSQL connection URL") from None
         return value
 
     @field_validator("http_max_retries")

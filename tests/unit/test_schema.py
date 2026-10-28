@@ -80,6 +80,9 @@ def test_assoc_unique_constraints() -> None:
 
     assert "uq_repository_topics" in names(table("repository_topics"))
     assert "uq_repository_contributors" in names(table("repository_contributors"))
+    # PostgreSQL folds the initial migration's duplicate UNIQUE/PK into this named PK.
+    for name in ("repository_topics", "repository_contributors"):
+        assert table(name).primary_key.name == f"uq_{name}"
 
 
 def test_snapshot_observation_policy_constraint() -> None:

@@ -15,12 +15,18 @@ from sqlalchemy.ext.asyncio import (
 logger = logging.getLogger(__name__)
 
 
-def make_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
+def make_engine(database_url: str, *, echo: bool = False, public: bool = False) -> AsyncEngine:
     """Create an async engine with connection health checks enabled."""
     engine = create_async_engine(
         database_url,
         pool_pre_ping=True,
         echo=echo,
+        hide_parameters=True,
+        **({"pool_size": 2, "max_overflow": 1, "pool_timeout": 3,
+            "connect_args": {"timeout": 3, "server_settings": {
+                "default_transaction_read_only": "on", "statement_timeout": "5000",
+                "application_name": "github-radar-public",
+            }}} if public else {}),
     )
     return engine
 
@@ -37,7 +43,7 @@ async def ping(engine: AsyncEngine) -> bool:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception:  # noqa: BLE001 - deliberate probe, caller decides policy
-        logger.exception("Database connectivity check failed")
+        logger.error("Database connectivity check failed; connection details suppressed")
         return False
     return True
 

@@ -35,7 +35,7 @@ function setup(kind: "developers" | "repositories" = "developers", total = 1) {
     return response({ items: [kind === "developers" ? developer : repository], limit: 25, offset, total, has_more: offset + 25 < total });
   });
   vi.stubGlobal("fetch", fetcher);
-  render(<MemoryRouter initialEntries={[`/workspace/${kind}`]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+  render(<MemoryRouter initialEntries={[`/workspace/${kind}`]}>
     <Routes><Route path="workspace" element={<WorkspaceLayout />}>
       <Route path="developers" element={<WorkspacePage kind="developers" />} />
       <Route path="repositories" element={<WorkspacePage kind="repositories" />} />

@@ -655,6 +655,9 @@ def test_alembic_migrations_apply_to_postgres() -> None:
     upgrade = _run_alembic("upgrade", "head")
     assert upgrade.returncode == 0, upgrade.stderr
 
+    agreement = _run_alembic("check")
+    assert agreement.returncode == 0, agreement.stdout + agreement.stderr
+
     expected_head = _alembic_head_revision()
     upgraded = _run_alembic("current")
     assert upgraded.returncode == 0, upgraded.stderr

@@ -1,4 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
+import { api } from "../lib/api";
+import { DeploymentContext } from "../lib/deployment";
+import { useAsync } from "../lib/useAsync";
 
 const NAV: Array<{ to: string; label: string }> = [
   { to: "/", label: "Explore" },
@@ -12,6 +15,8 @@ const NAV: Array<{ to: string; label: string }> = [
 ];
 
 export function Layout() {
+  const { data } = useAsync("capabilities", () => api<{ mode: "local" | "public" }>("/capabilities"));
+  const mode = data?.mode === "local" ? "local" : data?.mode === "public" ? "public" : null;
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main">
@@ -26,7 +31,7 @@ export function Layout() {
         </div>
         <nav aria-label="Primary">
           <ul className="nav-list">
-            {NAV.map((item) => (
+            {NAV.filter(item => mode === "local" || !["/ai", "/workspace"].includes(item.to)).map((item) => (
               <li key={item.to}>
                 <NavLink
                   to={item.to}
@@ -41,7 +46,7 @@ export function Layout() {
         </nav>
       </header>
       <main id="main" className="site-main">
-        <Outlet />
+        <DeploymentContext.Provider value={mode}><Outlet /></DeploymentContext.Provider>
       </main>
       <footer className="site-footer">
         <p>
