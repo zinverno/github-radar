@@ -107,6 +107,8 @@ async def test_public_forbidden_before_database(method, path):
         {"Host": "evil.test", "X-Forwarded-Host": "radar.test"},
         {"Host": "radar.test.evil"},
         {"Host": "user@radar.test"},
+        {"Host": " radar.test"},
+        {"Host": "radar.test\t"},
         [("Host", "radar.test"), ("Host", "radar.test")],
     ],
 )
@@ -229,15 +231,16 @@ async def test_readiness_schema_version_and_failure():
     assert not await database_ready(factory, public=False)
 
 
-@pytest.mark.parametrize(
-    "values", [["off"], ["on", True], ["on", False, True], ["on", False, False]]
-)
-async def test_public_readiness_requires_readonly_and_no_private_grants(values):
+@pytest.mark.parametrize("readonly, allowed", [("off", True), ("on", False), ("on", True)])
+async def test_public_readiness_requires_readonly_and_role_audit(readonly, allowed, monkeypatch):
     session = AsyncMock()
     factory = Mock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=session)))
     session.scalars.return_value = Mock(all=Mock(return_value=["0006"]))
-    session.scalar.side_effect = values
-    assert await database_ready(factory, public=True) == (values == ["on", False, False])
+    session.scalar.return_value = readonly
+    audit = AsyncMock(side_effect=None if allowed else ValueError("unsafe grants"))
+    monkeypatch.setattr("github_radar.api.readiness.audit_application_role", audit)
+    assert await database_ready(factory, public=True) == (readonly == "on" and allowed)
+    assert audit.await_count == (1 if readonly == "on" else 0)
 
 
 async def test_public_reads_never_include_private_state():

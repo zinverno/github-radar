@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import ssl
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from github_radar.config import Settings
+from github_radar.storage.connection import direct_url, tls_options
 from github_radar.storage.db import make_engine
 
 RESTORE_TARGET = "github_radar_restore_check"
@@ -41,8 +43,8 @@ def validate_target(source: str, target: str, confirmation: str) -> URL:
 
 
 def pg_environment(url: URL) -> dict[str, str]:
-    if url.query:
-        raise ValueError("Review custom database connection options before backup")
+    url = direct_url(url.render_as_string(hide_password=False))
+    tls, ca = tls_options(url)
     env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
     env.update(
         PGHOST=url.host or "",
@@ -52,7 +54,14 @@ def pg_environment(url: URL) -> dict[str, str]:
         PGPASSWORD=url.password or "",
         PGCONNECT_TIMEOUT="5",
         PGOPTIONS="-c statement_timeout=30000 -c lock_timeout=5000",
+        PGSSLMODE="verify-full" if tls else "disable",
+        PGSSLMINPROTOCOLVERSION="TLSv1.2",
     )
+    if tls:
+        ca = ca or ssl.get_default_verify_paths().cafile
+        if not ca or not Path(ca).is_file():
+            raise ValueError("Backup requires an explicit trusted CA bundle")
+        env["PGSSLROOTCERT"] = ca
     return env
 
 
@@ -83,10 +92,10 @@ async def require_empty(connection: AsyncConnection) -> None:
         text("""
         SELECT EXISTS (
           SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+          WHERE left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema'
         ) OR EXISTS (
           SELECT 1 FROM pg_namespace
-          WHERE nspname NOT LIKE 'pg_%' AND nspname NOT IN ('public', 'information_schema')
+          WHERE left(nspname, 3) <> 'pg_' AND nspname NOT IN ('public', 'information_schema')
         ) OR EXISTS (
           SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE n.nspname = 'public'

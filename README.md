@@ -1,5 +1,8 @@
 # github-radar
 
+Public beta preparation: [Render Free + Neon Free deployment runbook](docs/PUBLIC_DEPLOYMENT.md).
+Provisioning, deployment and collection activation require separate operator approval.
+
 GitHub ecosystem intelligence. **Phase 1** builds the production-minded,
 data-owning foundation: it discovers GitHub repositories by topic/query, tracks
 them over time through append-only snapshots, and stores normalized

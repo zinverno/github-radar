@@ -24,12 +24,13 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from github_radar.config import get_settings
+from github_radar.storage.connection import connection_options
 from github_radar.storage.models import Base
 
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
@@ -81,10 +82,13 @@ async def run_async_migrations() -> None:
     # alembic.ini section (which may still carry the driver:// placeholder).
     section = dict(config.get_section(config.config_ini_section, {}))
     section["sqlalchemy.url"] = URL
+    url, ssl = connection_options(URL)
+    section["sqlalchemy.url"] = url
     connectable = async_engine_from_config(
         section,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"ssl": ssl},
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
@@ -92,7 +96,11 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    asyncio.run(run_async_migrations())
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        do_run_migrations(connection)
+    else:
+        asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():

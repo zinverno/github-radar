@@ -129,7 +129,7 @@ def create_app(
             if settings.deployment_mode == "public":
                 if not (dist / "index.html").is_file():
                     raise RuntimeError("Public mode requires a built frontend")
-                if not await database_ready(resolved_factory, public=True):
+                if not await database_ready(resolved_factory, public=True, timeout=15):
                     raise RuntimeError("Public readiness failed; check schema and role grants")
             yield
         finally:
