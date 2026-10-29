@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlsplit
 
 from starlette._utils import get_route_path
@@ -66,6 +67,10 @@ class DeploymentBoundary:
                 started = True
                 if self.public:
                     MutableHeaders(scope=message).update(PRIVATE_HEADERS)
+                    MutableHeaders(scope=message).update({
+                        "Strict-Transport-Security": "max-age=31536000",
+                        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+                    })
             await send(message)
 
         async def refuse(status: int, code: str, message: str) -> None:
@@ -80,6 +85,8 @@ class DeploymentBoundary:
                 host.port
                 valid = (
                     len(headers.getlist("host")) == 1
+                    and re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]{1,5})?", headers.get("host", ""))
+                    is not None
                     and host.hostname in self.hosts
                     and not any(
                         (host.username, host.password, host.path, host.query, host.fragment)

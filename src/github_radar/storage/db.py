@@ -12,21 +12,28 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from github_radar.storage.connection import connection_options
+
 logger = logging.getLogger(__name__)
 
 
 def make_engine(database_url: str, *, echo: bool = False, public: bool = False) -> AsyncEngine:
     """Create an async engine with connection health checks enabled."""
+    url, ssl = connection_options(database_url)
+    connect_args: dict[str, object] = {"ssl": ssl}
+    if public:
+        connect_args.update(timeout=10, command_timeout=5, server_settings={
+            "default_transaction_read_only": "on", "statement_timeout": "5000",
+            "lock_timeout": "2000", "idle_in_transaction_session_timeout": "10000",
+            "application_name": "github-radar-public", "search_path": "pg_catalog,public",
+        })
     engine = create_async_engine(
-        database_url,
+        url,
         pool_pre_ping=True,
         echo=echo,
         hide_parameters=True,
-        **({"pool_size": 2, "max_overflow": 1, "pool_timeout": 3,
-            "connect_args": {"timeout": 3, "server_settings": {
-                "default_transaction_read_only": "on", "statement_timeout": "5000",
-                "application_name": "github-radar-public",
-            }}} if public else {}),
+        connect_args=connect_args,
+        **({"pool_size": 2, "max_overflow": 0, "pool_timeout": 3} if public else {}),
     )
     return engine
 

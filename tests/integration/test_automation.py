@@ -40,6 +40,7 @@ async def collector(database, settings):
             text("SELECT 1 FROM pg_roles WHERE rolname = :name"), {"name": policy.COLLECTOR_ROLE}
         )
         await conn.execute(text("CREATE ROLE github_radar_collector NOLOGIN"))
+        await conn.execute(text("REVOKE CREATE, TEMP ON DATABASE github_radar_test FROM PUBLIC"))
         await conn.execute(text("GRANT USAGE ON SCHEMA public TO github_radar_collector"))
         await conn.execute(
             text("CREATE TABLE IF NOT EXISTS alembic_version (version_num varchar(32) PRIMARY KEY)")

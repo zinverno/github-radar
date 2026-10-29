@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import ssl
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -14,7 +13,6 @@ from uuid import UUID
 
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -30,7 +28,9 @@ from github_radar.github.client import GitHubClient
 from github_radar.services.collection import CollectionService, stored_report
 from github_radar.services.quality import load_quality_report
 from github_radar.storage.collection import locked_collection_session
+from github_radar.storage.connection import direct_url, verified_context
 from github_radar.storage.models import CollectionRunRow, RepositoryRow, SnapshotRow
+from github_radar.storage.permissions import audit_application_role
 from github_radar.util import utcnow
 
 Kind = Literal["refresh", "discover"]
@@ -147,7 +147,7 @@ class CollectorCredentials:
     def from_environment(cls, env: Mapping[str, str]) -> CollectorCredentials:
         value = env.get("COLLECTOR_DATABASE_URL", "")
         try:
-            url = make_url(value)
+            url = direct_url(value)
             valid = (
                 url.drivername == "postgresql+asyncpg"
                 and url.username == COLLECTOR_ROLE
@@ -167,11 +167,7 @@ class CollectorCredentials:
 
     def engine(self) -> AsyncEngine:
         # An explicit context avoids SSLKEYLOGFILE and forbids URL SSL overrides.
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.load_default_certs()
-        if self.ca_pem:
-            context.load_verify_locations(cadata=self.ca_pem)
+        context = verified_context(ca_pem=self.ca_pem)
         return create_async_engine(
             self.database_url,
             poolclass=NullPool,
@@ -258,6 +254,10 @@ async def check_collector_role(session: AsyncSession) -> None:
             {"name": f"public.{table}"},
         ):
             raise AutomationBlocked("Collector is missing collection sequence usage grants")
+    try:
+        await audit_application_role(session, collector=True)
+    except ValueError:
+        raise AutomationBlocked("Collector has unreviewed effective privileges") from None
 
 
 def period_start(kind: Kind, now: datetime) -> datetime:

@@ -1,5 +1,9 @@
 # Phase 8A — production readiness review
 
+For the current Render/Neon deployment procedure and stricter role/TLS requirements,
+use [Phase 8C-A public deployment](PUBLIC_DEPLOYMENT.md). This document retains
+the historical Phase 8A results and `PRE-BETA-UX-001` record.
+
 Phase 8A prepares a **read-only public beta**. It does not deploy the service,
 provision infrastructure, run collection, migrate the application database, or
 make the private workspace suitable for public/proxy access. Baseline:

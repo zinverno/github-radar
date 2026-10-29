@@ -1,0 +1,29 @@
+# Creation/sync can provision and deploy. Operator approval is required first.
+previews:
+  generation: "off"
+services:
+  - type: web
+    name: github-radar-public-beta
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: main
+    numInstances: 1
+    autoDeployTrigger: "off"
+    buildCommand: bash deploy/build.sh
+    startCommand: env PYTHONPATH=src .venv/bin/python -m github_radar.public_server
+    healthCheckPath: /api/v1/health
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.13
+      - key: NODE_VERSION
+        value: 24.14.1
+      - key: UV_VERSION
+        value: 0.11.6
+      - key: DEPLOYMENT_MODE
+        value: public
+      - key: PUBLIC_ALLOWED_HOSTS
+        sync: false
+# Add DATABASE_URL only after a credential-free build, via Save and deploy (no rebuild).
+# First-build reuse after fail-closed startup is an unverified activation gate; see runbook.

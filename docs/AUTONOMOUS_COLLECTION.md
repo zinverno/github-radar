@@ -180,10 +180,12 @@ grants on future private tables. Revoke inherited/PUBLIC privileges on private/A
 tables if necessary. Diagnostics need public developer/contributor reads; collection
 does not write them. Snapshot updates are retained for the existing same-timestamp
 observation contract; topic DELETE is required to remove obsolete associations.
-Association rows need INSERT/DELETE, not UPDATE. The preflight checks minimum
-collection grants and rejects direct table/column privileges on private/AI tables;
-it is not a complete audit of role memberships or privileges through views/functions.
-The external role's full effective privileges still require operator verification.
+Association rows need INSERT/DELETE, not UPDATE. Phase 8C-A additionally audits
+effective table/column/sequence grants, PUBLIC defaults, memberships/SET ROLE paths,
+ownership and executable user-defined functions, and refuses known Neon pooler
+hosts. Use [the current role setup and TLS runbook](PUBLIC_DEPLOYMENT.md), including
+revocation of PUBLIC database CREATE/TEMP. External provider grants/topology still
+require operator verification.
 
 ## Monitoring, stopping and recovery
 
