@@ -1,6 +1,11 @@
 """Vendor backports, actual loader identity and package integrity fail closed."""
 
 import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -66,6 +71,30 @@ def test_native_override_values_are_not_logged(name, monkeypatch):
     with pytest.raises(ValueError, match="overrides are forbidden") as error:
         native.require_implementation()
     assert "PRIVATE_OVERRIDE_VALUE" not in str(error.value)
+
+
+@pytest.mark.parametrize("name", ["LD_PRELOAD", "LD_LIBRARY_PATH"])
+def test_actual_library_injection_is_rejected_in_fresh_process(name, tmp_path):
+    report = native.native_report()
+    for library in report["libraries"]:
+        path = Path(library["path"])
+        if path.name in {"libssl.so.3", "libcrypto.so.3"}:
+            shutil.copy2(path, tmp_path / path.name)
+    injected = str(tmp_path / "libcrypto.so.3") if name == "LD_PRELOAD" else str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "github_radar.native"],
+        env=dict(os.environ, **{name: injected}),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "status": "BLOCKED", "reason": "Native library overrides are forbidden"
+    }
+    assert not result.stderr
+    assert injected not in result.stdout
 
 
 def test_bundled_distribution_refused_even_when_not_selected(monkeypatch):

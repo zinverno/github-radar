@@ -272,13 +272,20 @@ async def blackhole(seconds=0.3):
                 link = relay.links[-1]
                 link.arm()
                 started = time.monotonic()
-                task = asyncio.create_task(c.execute(text("SELECT pg_sleep(30)")))
+                # Measure the operation, including time spent awaiting observer barriers.
+                task = asyncio.create_task(
+                    failure(
+                        c.execute(text("SELECT pg_sleep(30)")),
+                        maximum=seconds + 1,
+                        minimum=max(0, seconds - 0.2),
+                    )
+                )
                 await barrier(link.held)  # Server's 50ms cancellation cannot reach client.
                 state = (await observer("SELECT state FROM pg_stat_activity WHERE pid=%s", (pid,)))[
                     0
                 ][0]
                 assert state == "idle in transaction (aborted)"
-                exc = await failure(task, maximum=seconds + 1, minimum=max(0, seconds - 0.2))
+                exc = await task
                 assert outcome_uncertain(exc) and c.invalidated and raw.closed
                 await barrier(link.client_eof)
                 DETAIL.update(

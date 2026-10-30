@@ -1,16 +1,18 @@
 # Phase 8C-B production PostgreSQL driver migration
 
-**Local native blocker: RESOLVED in the verified Debian 12 environment.**
+**Local native blocker: RESOLVED in the verified Debian 12 and Ubuntu 24.04 test environments.**
 **DEPLOYMENT BLOCKED:** Render's actual libpq, OpenSSL packages and Python TLS
 linkage have not been verified or supplied reproducibly. Hosted CI and the other
-cloud acceptance gates remain open. Local acceptance authorizes the reviewed commit only.
+cloud acceptance gates remain open at local acceptance; the focused CI repair is recorded below.
 
 Baseline: `ae9e93d19670f4029f36e12ce0b15cb9222f34de`, verified against `origin/main`
 and the remote main reference before work. Branch: `feat/psycopg3-libpq-migration`.
-No push, merge, deployment or collection activation is authorized by this acceptance.
+The original migration acceptance authorized a local commit only. The separately
+authorized PR #5 CI repair below permits a focused commit and push, but no merge,
+deployment or collection activation.
 Verification date: 2026-10-30 (Europe/Moscow).
 
-## Final commit acceptance
+## Original migration commit acceptance
 
 Final review confirmed the branch, HEAD, `origin/main` and remote main at the exact
 baseline above, and matched all 51 files to the recorded review manifest. No
@@ -28,7 +30,88 @@ does not approve hosted execution or Render deployment. Supplemental evidence is
 `evidence/final-acceptance-native.log`; `evidence/commit-review-manifest.json` records
 the final file hashes while retaining the earlier pre-finalization manifest.
 
-## Acceptance status
+## PR #5 hosted CI loader correction (2026-10-30)
+
+The failed [run 40998182588](https://github.com/zinverno/github-radar/actions/runs/40998182588)
+used toolcache CPython 3.12.15 on Ubuntu 24.04. The pinned `setup-python` action
+exports `LD_LIBRARY_PATH` on Linux when its default `update-environment` is true;
+this is unconditional setup behavior, not evidence that this binary needs it.
+The unchanged native guard correctly rejected that override before linkage checks.
+[Pinned action implementation](https://github.com/actions/setup-python/blob/e797f83bcb11b83ae66e0230d6156d7c80228e7c/src/find-python.ts).
+
+**IMPLEMENTED:** All five Python jobs in CI/refresh/discovery now select exact
+3.12.15 with `update-environment: false`. Only the returned executable directory
+is added to PATH; `UV_PYTHON` selects that executable and `UV_PYTHON_DOWNLOADS=never`
+prevents a managed-interpreter fallback. No loader variable is cleared or allowed.
+Inherited overrides still reach the fail-closed gate. Production code, dependency
+locks, native baselines, action pins, activation gates and schedules are unchanged.
+
+**VERIFIED locally:** The exact official
+[Ubuntu artifact](https://github.com/actions/python-versions/releases/tag/3.12.15-36805895057)
+was downloaded and matched GitHub's asset SHA-256
+`fcb672b0437c2d8df5565b7cc250b2b0d7455e2b8d6a4a107cfa6f2efe4f7ed8`.
+Testing used a disposable Ubuntu 24.04 amd64 filesystem from the official image
+manifest `sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d`,
+with signed Ubuntu and PGDG package installation. No host packages or operator
+credentials/databases were used. This is a local runner reproduction, not Render.
+
+ELF inspection found `DT_RUNPATH=/opt/hostedtoolcache/Python/3.12.15/x64/lib`.
+With no loader override, `/proc/self/maps` showed the following actual loaded
+objects; symbol resolution and dpkg file checks confirmed shared Python/libpq TLS:
+
+| Loaded object | Provenance | SHA-256 |
+| --- | --- | --- |
+| `/opt/hostedtoolcache/Python/3.12.15/x64/lib/libpython3.12.so.1.0` | Official artifact above; identical bytes | `c7c1a2206db0fa089f8a252d1652d5ccb82669774dbb599427082ffc9eaaae85` |
+| `/usr/lib/x86_64-linux-gnu/libpq.so.5.18` | `libpq5:amd64 18.6-1.pgdg24.04+2` | `e6f752c5ad7005afab0d9ea2932b93d6ad2d863b4333a55aafa1cdd734e74bde` |
+| `/usr/lib/x86_64-linux-gnu/libssl.so.3` | `libssl3t64:amd64 3.0.13-0ubuntu3.16` | `a40e7b67489bbd257e432c700ff8f6a1ad796425b5eccecdc2930127fdd86624` |
+| `/usr/lib/x86_64-linux-gnu/libcrypto.so.3` | Same Ubuntu package | `6866ed711dab8927e1bf82bf1cd30e828bdfc34f3cc1e83b1c9eb01ce6c37d9a` |
+
+The process reports OpenSSL 3.0.13; the Ubuntu package revision supplies the
+[CVE-2026-35189 backport](https://ubuntu.com/security/CVE-2026-35189).
+Psycopg remains 3.3.6/Python, SQLAlchemy 2.0.54 and runtime libpq 180006.
+No extra OpenSSL or psycopg-binary is accepted. Setting the exact failing runner
+loader path reproduced `Native library overrides are forbidden`; removing it in
+this controlled comparison passed the unchanged gate. The workflow solution does
+not unset it: it prevents `setup-python` from adding it in the first place.
+Fresh-process negative controls with copied shared libraries still reject both
+`LD_PRELOAD` and `LD_LIBRARY_PATH`, without exposing override values. Workflow
+regressions verify explicit interpreter selection and retention of hostile values.
+
+The first full Ubuntu run exposed a timing-origin defect in the existing
+0.3-second blackhole test: it measured only the remaining wait after the relay
+barrier and an authenticated observer query (0.087s, below its 0.1s lower bound).
+The failure collector now starts with the SQL operation. Its original lower and
+upper bounds, server-state, uncertainty and connection-invalidation assertions
+are unchanged. This corrects the measurement without loosening the deadline gate.
+The initial failure log is retained; it was not discarded as a passing retry.
+All 28 permanent deadline scenarios then passed in 56.28s; the separate asyncpg
+negative control also passed (29/29 total). Blackholed query failures measured
+0.3011s / 5.0014s / 15.0017s against 0.3s / 5s / 15s client budgets, with confirmed
+aborted server transactions and locally invalidated connections.
+
+**VERIFIED after the correction:** 1,024 Python tests passed, including 155
+PostgreSQL integration tests. The only two skips remain PostgreSQL 17-only MAINTAIN
+privilege cases on PostgreSQL 16.15; no new skip or warning filter was added.
+Frozen installation, Ruff, mypy (159 files), 94 focused native/workflow checks,
+all 29 deadline scenarios, Alembic revision 0006/drift checks and independent
+fixture backup/restore passed. Restored table counts match and constraints validate.
+The locked audit found no known vulnerabilities/adverse statuses in 47 packages;
+the unchanged native audit separately passed the CVE/backport and linkage checks.
+Actionlint 1.7.12, bash syntax and ShellCheck 0.9.0 passed for all five changed
+workflow shell steps. Frontend sources and dependencies are unchanged; their new
+hosted run remains a separate gate. The original frontend/resource evidence
+is preserved, not presented as a new run.
+At local acceptance, the new hosted run is pending; its result must be checked on
+PR #5 after the authorized push. **Render remains BLOCKED** pending its own actual
+native provenance and reproducible supply evidence. No collection workflow was
+invoked and no Neon, existing database or cloud permission was accessed.
+Private reproduction evidence: `build/radar-ci-loader-pgbz5gq6/evidence/`
+(`python-artifact.json`, `ubuntu-image.json`, `setup.log`, `loader-probe.log`,
+`focused.log`, `full-python-initial-timing-failure.log`, `full-python-final.log`,
+`deadlines.log`, `reference-control.log`, `audit.log`,
+`actionlint.log`, `shell.log`). These temporary artifacts are excluded from Git.
+
+## Original migration acceptance status
 
 | Status | Evidence / limitation |
 | --- | --- |

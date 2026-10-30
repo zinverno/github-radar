@@ -304,6 +304,47 @@ def test_workflow_security_contract(kind, flag, cron):
     assert "continue-on-error" not in json.dumps(workflow)
 
 
+@pytest.mark.parametrize("name", ["ci", "collection-refresh", "collection-discover"])
+def test_ci_python_selection_preserves_native_override_rejection(name, tmp_path):
+    workflow = yaml.load(
+        Path(f".github/workflows/{name}.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    for job in workflow["jobs"].values():
+        steps = job["steps"]
+        python = next(
+            (s for s in steps if s.get("uses", "").startswith("actions/setup-python@")), None
+        )
+        if python is None:
+            continue
+        assert python["with"] == {"python-version": "3.12.15", "update-environment": "false"}
+        selection = steps[steps.index(python) + 1]
+        assert selection["env"] == {
+            "REVIEWED_PYTHON": "${{ steps." + python["id"] + ".outputs.python-path }}"
+        }
+        path, env = tmp_path / "path", tmp_path / "env"
+        path.write_text("")
+        env.write_text("")
+        executable = "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python"
+        result = subprocess.run(
+            ["bash", "-euc", selection["run"] + '\nprintenv LD_LIBRARY_PATH'],
+            env={
+                "PATH": os.environ["PATH"],
+                "GITHUB_PATH": str(path),
+                "GITHUB_ENV": str(env),
+                "REVIEWED_PYTHON": executable,
+                "LD_LIBRARY_PATH": str(tmp_path),
+            },
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        # Inherited overrides must reach the unchanged fail-closed native gate.
+        assert result.stdout.strip() == str(tmp_path)
+        assert path.read_text() == str(Path(executable).parent) + "\n"
+        assert env.read_text() == f"UV_PYTHON={executable}\nUV_PYTHON_DOWNLOADS=never\n"
+
+
 @pytest.mark.parametrize("kind", ["refresh", "discover"])
 @pytest.mark.parametrize(
     "disabled", [None, "JOB_ENABLED", "LIVE_ENABLED", "LIVE_REQUESTED", "rerun"]
