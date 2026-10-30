@@ -141,6 +141,7 @@ from github_radar.storage import repositories as storage
 from github_radar.storage.ai_artifacts import serialize_evidence
 from github_radar.storage.collection import CollectionLockError, locked_collection_session
 from github_radar.storage.db import make_engine, make_session_factory
+from github_radar.storage.deadlines import outcome_uncertain
 from github_radar.storage.models import CollectionRunRow
 from github_radar.util import utcnow
 
@@ -246,8 +247,10 @@ def _run(coro: Any) -> Any:
     except ValueError as exc:
         typer.secho(f"Invalid input: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         typer.secho(
+            "Database transaction outcome uncertain; inspect durable state; do not replay."
+            if outcome_uncertain(exc) else
             "Database operation failed. Check connectivity and migrations; "
             "inspect collection-runs for incomplete work.", fg=typer.colors.RED, err=True,
         )

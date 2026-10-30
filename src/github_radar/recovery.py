@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 import json
 import os
-import ssl
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from github_radar.config import Settings
-from github_radar.storage.connection import direct_url, tls_options
+from github_radar.storage.connection import direct_url, tls_options, trusted_ca
 from github_radar.storage.db import make_engine
 
 RESTORE_TARGET = "github_radar_restore_check"
@@ -25,15 +24,16 @@ RESTORE_TARGET = "github_radar_restore_check"
 
 def validate_target(source: str, target: str, confirmation: str) -> URL:
     try:
-        url = make_url(target)
-        original = make_url(source)
+        url = direct_url(target)
+        original = direct_url(source)
+        tls_options(url)
+        tls_options(original)
         valid = (
             confirmation == RESTORE_TARGET
             and url.database == RESTORE_TARGET
             and original.database != RESTORE_TARGET
-            and url.drivername == "postgresql+asyncpg"
+            and url.drivername == "postgresql+psycopg"
             and url.host in {"127.0.0.1", "localhost", "::1"}
-            and not url.query
         )
     except Exception:
         valid = False
@@ -44,7 +44,7 @@ def validate_target(source: str, target: str, confirmation: str) -> URL:
 
 def pg_environment(url: URL) -> dict[str, str]:
     url = direct_url(url.render_as_string(hide_password=False))
-    tls, ca = tls_options(url)
+    _, ca = tls_options(url)
     env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
     env.update(
         PGHOST=url.host or "",
@@ -53,15 +53,14 @@ def pg_environment(url: URL) -> dict[str, str]:
         PGUSER=url.username or "",
         PGPASSWORD=url.password or "",
         PGCONNECT_TIMEOUT="5",
-        PGOPTIONS="-c statement_timeout=30000 -c lock_timeout=5000",
-        PGSSLMODE="verify-full" if tls else "disable",
+        PGOPTIONS="-c timezone=UTC -c statement_timeout=30000 -c lock_timeout=5000",
+        PGSSLMODE="verify-full",
+        PGCHANNELBINDING="require",
+        PGGSSENCMODE="disable",
+        PGPASSFILE=os.devnull,
         PGSSLMINPROTOCOLVERSION="TLSv1.2",
     )
-    if tls:
-        ca = ca or ssl.get_default_verify_paths().cafile
-        if not ca or not Path(ca).is_file():
-            raise ValueError("Backup requires an explicit trusted CA bundle")
-        env["PGSSLROOTCERT"] = ca
+    env["PGSSLROOTCERT"] = trusted_ca(ca)
     return env
 
 

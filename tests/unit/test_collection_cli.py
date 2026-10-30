@@ -115,3 +115,17 @@ def test_partial_budget_override_preserves_other_caps(offline_cli):
     assert result.exit_code == 0
     assert json.loads(result.output)["budget"]["profiles"] == 0
     assert json.loads(result.output)["budget"]["total"] == 5
+
+
+def test_local_cli_never_claims_rollback_for_uncertain_database(offline_cli, capsys):
+    from sqlalchemy.exc import OperationalError
+    from typer import Exit
+    async def uncertain():
+        raise OperationalError("PRIVATE SQL", {}, RuntimeError("PRIVATE DRIVER"),
+                               connection_invalidated=True)
+    with pytest.raises(Exit) as error:
+        offline_cli._run(uncertain())
+    output = capsys.readouterr().err
+    assert error.value.exit_code == 1
+    assert "outcome uncertain" in output and "do not replay" in output
+    assert "PRIVATE" not in output

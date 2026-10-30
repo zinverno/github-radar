@@ -12,8 +12,8 @@ from github_radar.recovery import (
     validate_target,
 )
 
-SOURCE = "postgresql+asyncpg://local:password@127.0.0.1/github_radar"
-TARGET = "postgresql+asyncpg://local:password@127.0.0.1/" + RESTORE_TARGET
+SOURCE = "postgresql+psycopg://local:password@127.0.0.1/github_radar"
+TARGET = "postgresql+psycopg://local:password@127.0.0.1/" + RESTORE_TARGET
 
 
 @pytest.mark.parametrize(
@@ -39,7 +39,7 @@ async def test_restore_refuses_every_non_allowlisted_database(database, monkeypa
         TARGET.replace("127.0.0.1", "evil.test"),
         "bad",
         "",
-        TARGET.replace("asyncpg", "psycopg"),
+        TARGET.replace("psycopg", "asyncpg"),
     ],
 )
 def test_restore_rejects_ambiguous_connection(target):

@@ -17,7 +17,7 @@ BASE_URL = "https://api.github.com"
 def settings() -> Settings:
     return Settings(
         github_token="test-token",
-        database_url="postgresql+asyncpg://u:p@localhost:5432/radar",
+        database_url="postgresql+psycopg://u:p@localhost:5432/radar",
         github_api_base_url=BASE_URL,
         http_max_retries=2,
         rate_limit_pause_threshold=0,

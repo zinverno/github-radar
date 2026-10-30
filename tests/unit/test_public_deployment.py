@@ -47,7 +47,7 @@ def test_credentials_not_in_repr_or_validation_error():
         _env_file=None,
         github_token=TOKEN,
         ai_api_key=TOKEN,
-        database_url=f"postgresql+asyncpg://user:{TOKEN}@localhost/db",
+        database_url=f"postgresql+psycopg://user:{TOKEN}@localhost/db",
     )
     assert TOKEN not in repr(settings)
     with pytest.raises(ValidationError) as error:
@@ -301,7 +301,7 @@ def test_launcher_requires_explicit_public_mode_and_disables_proxy_and_access_lo
     cli = importlib.import_module("github_radar.cli.app")
     settings = workspace_settings().model_copy(
         update={
-            "database_url": "postgresql+asyncpg://unused@localhost/db",
+            "database_url": "postgresql+psycopg://unused@localhost/db",
         }
     )
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
@@ -310,7 +310,7 @@ def test_launcher_requires_explicit_public_mode_and_disables_proxy_and_access_lo
     runner = CliRunner()
     assert runner.invoke(cli.app, ["serve", "--host", "0.0.0.0"]).exit_code == 1
     run.assert_not_called()
-    settings = public_settings(database_url="postgresql+asyncpg://unused@localhost/db")
+    settings = public_settings(database_url="postgresql+psycopg://unused@localhost/db")
     assert runner.invoke(cli.app, ["serve", "--host", "0.0.0.0"]).exit_code == 0
     assert run.call_args.kwargs["proxy_headers"] is False
     assert run.call_args.kwargs["access_log"] is False
@@ -333,6 +333,22 @@ async def test_public_websocket_rejected():
 def test_invalid_database_port_does_not_leak_secret():
     with pytest.raises(ValidationError) as error:
         Settings(  # type: ignore[call-arg]
-            _env_file=None, database_url=f"postgresql+asyncpg://user@localhost:{TOKEN}/db"
+            _env_file=None, database_url=f"postgresql+psycopg://user@localhost:{TOKEN}/db"
         )
     assert TOKEN not in str(error.value)
+
+
+@pytest.mark.parametrize("public", [False, True])
+async def test_uncertain_database_result_is_explicit_and_redacted(public, caplog):
+    from sqlalchemy.exc import OperationalError
+    failure = OperationalError("PRIVATE SQL", {"password": "PRIVATE PASSWORD"},
+                               RuntimeError("PRIVATE DRIVER"), connection_invalidated=True)
+    settings = public_settings() if public else workspace_settings()
+    app = create_app(settings, session_factory=Mock(side_effect=failure))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://radar.test") as client:
+        response = await client.get("/api/v1/repositories")
+    assert response.status_code == 500
+    assert "outcome uncertain" in response.json()["error"]["message"]
+    assert "do not replay" in response.text
+    assert "PRIVATE" not in response.text + caplog.text

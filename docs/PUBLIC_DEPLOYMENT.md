@@ -1,10 +1,12 @@
-# Public beta deployment: Phase 8C-A
+# Public beta deployment
 
-Preparation only. Baseline: `4cf885f21ed67c97df7d7073dcf52d77a3422d23` (merged
-Phase 8B). No cloud resource, live collection, schedule activation, application
-database access, private-data import or push is part of this phase. Final acceptance
-authorizes one reviewed local commit; it does not authorize deployment.
-See [verification and changed files](PHASE8C_A_VERIFICATION.md) for observed results.
+Current runtime: Phase 8C-B psycopg migration, based on
+`ae9e93d19670f4029f36e12ce0b15cb9222f34de`. Deployment and Neon initialization
+still require separate operator authorization. The migration changes no schema,
+provider permissions, data or collection activation gates. See
+[driver migration verification](PHASE8C_B_MIGRATION_VERIFICATION.md) for current
+local evidence and [Phase 8C-A verification](PHASE8C_A_VERIFICATION.md) for the
+historical deployment preparation results.
 
 ## Status and architecture
 
@@ -12,8 +14,8 @@ See [verification and changed files](PHASE8C_A_VERIFICATION.md) for observed res
 | --- | --- |
 | IMPLEMENTED | Manual Render Blueprint, frozen build, bounded public entrypoint, direct verified TLS, effective role checks, empty database initializer and TLS-capable recovery |
 | VERIFIED | Local disposable PostgreSQL, local CA positive/negative TLS, real HTTP/SPA, role attacks, recovery, resource smoke and deterministic regression (details in report) |
-| NOT VERIFIED | Render native build/edge/custom-domain behavior and reuse of a build after failed initial startup, actual Neon certificate chain/roles/extensions/hibernation, hosted CI for this commit, representative sustained beta load |
-| BLOCKED | Public release until credential-free build/runtime handoff is proven, operator approval, hosted checks, reviewed data policy, external acceptance, independent backup custody and quota checks are complete |
+| NOT VERIFIED | Render native build/edge/custom-domain behavior and reuse of a build after failed initial startup, current runtime on Neon, provider roles/extensions/hibernation, hosted CI for this commit, representative sustained beta load |
+| BLOCKED | Deployment acceptance: Render native libpq/OpenSSL/Python linkage and reproducible supply remain unverified (local CVE correction passed; see migration report). Public release until credential-free build/runtime handoff is proven, operator approval, hosted checks, reviewed data policy, external acceptance, independent backup custody and quota checks are complete |
 
 ```mermaid
 flowchart LR
@@ -56,6 +58,9 @@ Run both from the repository root of the approved commit.
 - `uv sync --frozen --no-dev --no-install-project` installs runtime dependencies
   from `uv.lock`. Source runs via `PYTHONPATH=src`, avoiding an unpinned isolated
   hatchling build dependency. No migration is part of the build or start command.
+- The build then runs `python -m github_radar.native` with the installed environment.
+  It refuses unsupported/bundled psycopg and unverifiable or affected native TLS
+  dependencies; the runtime repeats the check before opening the database.
 - `deploy/build_frontend.py` copies only the reviewed frontend source/config/lock
   inputs to a temporary directory and runs `npm ci --ignore-scripts` and the real
   Vite production build. Child commands receive a small explicit environment;
@@ -104,7 +109,7 @@ the build guard is not an acceptable workaround.
 | --- | --- |
 | `DEPLOYMENT_MODE` | `public` on Render |
 | `PUBLIC_ALLOWED_HOSTS` | JSON array of exact lowercase deployed hostnames, e.g. `["github-radar-public-beta.onrender.com"]`; replace with actual assigned names, including every verified custom domain |
-| `DATABASE_URL` | Runtime only, absent during builds. Reader: `postgresql+asyncpg://radar_public:URL_ENCODED_PASSWORD@DIRECT_HOST/radar_beta?sslmode=verify-full`; supply through the gated handoff above |
+| `DATABASE_URL` | Runtime only, absent during builds. Reader: `postgresql+psycopg://radar_public:URL_ENCODED_PASSWORD@DIRECT_HOST/radar_beta?sslmode=verify-full&channel_binding=require`; supply through the gated handoff above |
 | `PORT` | Assigned by Render; launcher validates and binds `0.0.0.0:$PORT` |
 | `PYTHON_VERSION`, `NODE_VERSION`, `UV_VERSION` | Pinned in Blueprint; build inputs |
 | `MIGRATION_DATABASE_URL` | Operator terminal only, never Render or collector |
@@ -147,22 +152,56 @@ hostnames are refused; arbitrary proxy names cannot be identified by a URL parse
 so the operator must confirm the topology. Pooled public-reader support is not
 implemented. [Neon pooling semantics](https://neon.com/docs/connect/connection-pooling).
 
-Reader/migration/recovery URLs accept `sslmode=verify-full` (or the legacy
-`ssl=verify-full`) and an optional absolute `sslrootcert` CA-bundle path. Conflicting,
-duplicate, weak or unknown URL options fail; no option is silently discarded.
-The collector retains its Phase 8B query-free URL and explicit verified context,
-optionally extended by `COLLECTOR_CA_PEM`. A pasted Neon URL containing
-`channel_binding=require` is rejected rather than silently weakening that setting:
-this asyncpg configuration verifies certificates/hostnames, but does not claim
-SCRAM channel-binding enforcement.
+Reader/migration/recovery URLs require the `postgresql+psycopg://` scheme and
+accept only `sslmode=verify-full`, `channel_binding=require` and an optional
+absolute `sslrootcert` CA-bundle path. Missing channel_binding is fixed to
+`require` in code; no weaker value is accepted. Remote URLs must explicitly set
+verify-full. Duplicate keys (even equal values), blank or malformed parameters,
+fragments, ambiguous identities, legacy `ssl=` and unknown options fail before
+connecting. Usernames and passwords must be URL-encoded. No credentials are
+rewritten or guessed. The collector retains its query-free URL contract; its
+factory explicitly supplies these mandatory security settings.
 
-Python uses an explicit `CERT_REQUIRED` context, hostname checks and TLS >=1.2,
-without SSL key logging. Default system CA roots apply unless a CA file is
-specified. `pg_dump` gets the corresponding `PGSSLMODE=verify-full`, CA file and
-minimum TLS version. All ambient `PG*` overrides are cleared. Only explicit
-loopback development URLs without TLS options allow plaintext; the public
-entrypoint always requires TLS, including in tests. See
-[Neon secure connections](https://neon.com/docs/connect/connect-securely).
+The frozen runtime uses plain psycopg **3.3.6**, the **Python implementation**,
+system libpq **18.6**, and SQLAlchemy **2.0.54**. psycopg-binary is forbidden.
+The native gate requires Debian 12 libssl3 **3.0.22-1~deb12u2** or a later accepted
+vendor revision (Ubuntu 24.04 CI: libssl3t64 **3.0.13-0ubuntu3.16** minimum), verified
+package files, and Python `_ssl`/`_hashlib` sharing those system libraries. It does
+not accept a static Python OpenSSL build. Other driver/OS implementations fail
+closed until reviewed. This is a vendor-backport check, not an upstream version
+comparison or a full OS vulnerability scan. See the [native provenance evidence](PHASE8C_B_MIGRATION_VERIFICATION.md).
+
+**DEPLOYMENT BLOCKED:** do not assume Render has these packages, libpq version or
+Python linkage. Prove the actual image and repeatable supply path before approval;
+otherwise a Docker proposal needs separate review. No runtime switch is made here.
+Libpq verifies certificate trust and hostname (`verify-full`), requires SCRAM
+channel binding, and requires TLS >=1.2. GSS encryption, default client certificates,
+password files and TLS key logging are disabled. System CA trust is explicit;
+`SSL_CERT_FILE`/`SSL_CERT_DIR` do not override it. `COLLECTOR_CA_PEM` optionally
+extends trust through a mode-0600 temporary bundle scoped to each authentication
+attempt. All sessions explicitly use **UTC**, including new pooled connections.
+
+Every runtime profile refuses ambient nonempty `PG*` settings. Backup subprocesses
+clear inherited `PG*` settings and inject explicit verified TLS, required channel
+binding, trusted CA, UTC and bounded connection/statement/lock settings. Loopback
+also requires TLS and SCRAM; there is **no plaintext development fallback**.
+Local servers therefore need a trusted certificate matching the configured hostname
+and SCRAM passwords. See [local configuration migration](PHASE8C_B_MIGRATION_VERIFICATION.md)
+and [libpq security options](https://www.postgresql.org/docs/18/libpq-connect.html).
+
+Earlier Stage 1 independently established a direct Neon PostgreSQL 16.15 endpoint,
+TLS 1.3 trust/hostname verification and libpq authentication with required binding.
+That is prior operator evidence, not a claim that this production revision has
+connected to Neon. Neon terminates client TLS at its proxy; compute-side
+`pg_stat_ssl=false` alone does not disprove client TLS. Verify the client's libpq
+TLS state and required connection parameters during separately authorized acceptance.
+
+**BLOCKED: provider-owned `postgres` database PUBLIC CONNECT/TEMPORARY grants.**
+Future restricted roles may inherit access outside `radar_beta`. Do not attempt
+unauthorized REVOKE on provider-owned objects or silently add an audit exception.
+Record the exact reachable databases, effective privileges and absence of private
+objects, then obtain a narrowly scoped explicit operator acceptance decision or
+use a provider topology satisfying the existing policy. This remains unresolved.
 
 | Role | Effective privileges |
 | --- | --- |
@@ -218,7 +257,8 @@ identified in the change record. No step reads or clones the existing applicatio
    It refuses a populated schema and application roles. It is never called by
    the web service. A failure is an operator review event, not a startup retry.
 4. Connect `psql -X` using discrete `PGHOST`, `PGDATABASE`, `PGUSER`, injected
-   `PGPASSWORD`, `PGSSLMODE=verify-full` and a trusted `PGSSLROOTCERT`. Clear inherited
+   `PGPASSWORD`, `PGSSLMODE=verify-full`, `PGCHANNELBINDING=require`,
+   `PGGSSENCMODE=disable` and a trusted `PGSSLROOTCERT`. Clear inherited
    `PGSERVICE`, `PGHOSTADDR`, `PGOPTIONS` and other overrides first. Then:
 
    ```sh
@@ -226,8 +266,9 @@ identified in the change record. No step reads or clones the existing applicatio
    ```
 
    Set the two passwords with `\password radar_public` and
-   `\password github_radar_collector`. Revoke application access to any default
-   unrelated database in the new Neon project; audit inherited/provider defaults.
+   `\password github_radar_collector`. Audit application access to default unrelated databases. Resolve the provider-owned
+   `postgres` PUBLIC grant blocker above before application-role acceptance; do not
+   modify provider-owned permissions without authorization.
 5. Verify the exact effective grants using the reader's startup/readiness and a
    read-only collector status/preflight. Confirm private tables and AI cache remain
    empty. Verify table owner, schema revision `0006`, TLS, and denied writes/SET ROLE.
@@ -286,7 +327,7 @@ certify any real dataset as public.
 - One worker, four concurrent connections/tasks, backlog 32, 2-second keepalive,
   20-second graceful shutdown and bounded HTTP header buffering. Public SQL pool:
   two connections, no overflow, 3-second checkout, 10-second connection timeout,
-  5-second statement/command timeout. Overload can return 503; do not add workers
+  5-second client I/O and server statement limits. Overload can return 503; do not add workers
   to mask memory pressure. The Render Free plan is
   [0.1 CPU and 512 MB](https://render.com/docs/compute-plans).
 - A Neon wake-up exceeding the 3-second readiness budget yields 503; a later
@@ -305,6 +346,17 @@ certify any real dataset as public.
   Keep the initial dataset small, measure realistic growth/load before admission,
   and suspend collection/public traffic when approaching quotas. No load SLA is claimed.
 
+Database I/O interruption abandons and invalidates the client connection immediately;
+it never proves server-side cancellation, rollback or advisory-lock release. A
+COMMIT with a lost reply is **uncertain**, even if the server committed it. Do not
+retry the whole run: inspect durable receipts and preserved rows first. The pinned
+collector refuses a replacement connection after ownership loss. A new public
+checkout may reconnect for a later request; it cannot replay the failed transaction.
+Each driver operation has a finite deadline, including commit hooks and rollback.
+Owned cleanup tasks consume their errors before the caller returns. Readiness and
+collection timers are cooperative outer limits; bounded cleanup can add time after
+those limits. Full CPU-bound request handling is not bounded by a socket I/O timer.
+
 ## Independent backup and recovery
 
 Neon history is a short fallback, not the only backup. Choose an operator-owned
@@ -319,7 +371,7 @@ restore drills. This is a proposed RPO <=24h; actual scheduling, custody and RTO
 must be accepted/measured by the operator. No backup schedule is activated here.
 
 The existing recovery tool previously rejected all URL query options. It now maps
-only reviewed verified-TLS options to both asyncpg and libpq. Unsafe options,
+only reviewed verified-TLS options to both psycopg and libpq. Unsafe options,
 pooler sources and downgrade attempts fail before a dump. Source is read-only;
 `pg_dump` shares its exported repeatable-read snapshot. Archives are mode 0600,
 created exclusively (never overwritten). Backup permissions must cover the whole
@@ -334,7 +386,10 @@ For a backup with an immediate recovery drill:
    The tool must have exclusive use of that destination throughout the drill.
 2. Inject the new beta owner's direct verified-TLS URL as `DATABASE_URL` in an
    isolated terminal with `DEPLOYMENT_MODE=local`; set `RESTORE_TEST_DATABASE_URL`
-   to the explicit loopback disposable database URL, with no query options.
+   to its explicit loopback psycopg URL with `sslmode=verify-full`,
+   `channel_binding=require` and the fixture CA path in `sslrootcert`. The
+   disposable server must support TLS/SCRAM with a matching hostname. No plaintext
+   target or remote restore is allowed.
 3. Run with a new output filename on private storage:
 
    ```sh
@@ -389,10 +444,14 @@ continuous DB polling. Set operational warning thresholds (e.g. 70% quota, 80%
 memory, backup older than 24h) in the operator checklist. No external monitoring
 service or telemetry integration is provisioned.
 
-For application rollback, select the recorded previously verified commit/build
-and manually redeploy; keep automatic deployment off. Render Free retains a
+For application rollback, select a recorded previously verified commit/build
+**only if it satisfies the approved security contract** and manually redeploy; keep automatic deployment off. Render Free retains a
 limited number of rollback deployments, so retain source/lock hashes independently.
-Do not automatically downgrade the database. Current readiness requires exactly
+The pre-migration asyncpg version does not enforce mandatory SCRAM channel
+binding. Reverting source/lockfiles to that version is possible, but serving it
+under this production contract is blocked. Keep the service and collector stopped
+until a reviewed secure artifact or an explicit policy decision is available.
+Never replay an uncertain collection run. Do not automatically downgrade the database. Current readiness requires exactly
 0006; incompatible future schemas require explicit recovery/compatibility review.
 For a leaked reader password, revoke/rotate it, save the new secret, and approve a
 manual redeploy. For integrity trouble, disable collection gates and public service
@@ -406,6 +465,8 @@ first, preserve evidence, then restore to a replacement only after review.
 - [ ] Create SQL application roles, set passwords, audit effective access and verified TLS.
 - [ ] Approve empty launch or an exact public-data artifact/policy; keep private tables empty.
 - [ ] Complete independent backup/decryption/restore drill and record RPO/RTO/custody.
+- [ ] Verify actual Render libpq/OpenSSL/Python linkage with the native audit and
+      record signed native package provenance and a repeatable supply path.
 - [ ] Prove the credential-free build/runtime handoff above, including first-build
       reuse after refused startup. Until then, activation remains blocked.
 - [ ] Configure only the runtime reader credential; remove it before every rebuild;

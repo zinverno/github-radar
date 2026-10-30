@@ -15,7 +15,7 @@ facts without measuring anything itself.
 ```
 ┌────────────────────────────── CLIENT ──────────────────────────────┐
 │  GitHub REST API  ──►  github/  ──►  domain/  ──►  storage/  ──►  PostgreSQL │
-│  (httpx)                raw JSON    canonical      SQLAlchemy 2.x    (asyncpg)
+│  (httpx)                raw JSON    canonical      SQLAlchemy 2.x    (psycopg)
 │                          models      dataclasses    async ORM
 └────────────────────────────────────────────────────────────────────┘
    ▲                  │            ▲
@@ -47,7 +47,7 @@ never writes back, so it can always be re-derived from freshly stored data.
 | `github/models.py` | Pydantic models for GitHub JSON payloads |
 | `github/errors.py` | Typed error hierarchy + `classify_error` |
 | `domain/models.py` | Canonical `Repository`, `Developer`, `Contributor`, `Topic`, `RepositorySnapshot` |
-| `storage/db.py` | Engine/session factory (`asyncpg`), `ping` |
+| `storage/db.py` | Engine/session factory (`psycopg`), `ping` |
 | `storage/models.py` | SQLAlchemy ORM (the schema — see below) |
 | `storage/repositories.py` | All persistence operations + queries + stats |
 | `analytics/metrics.py` | Deterministic per-window deltas/rates + `RepoMetrics` |
@@ -618,3 +618,30 @@ Phase 5 `AI_*` set (`AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`,
   `graph export --json` (node/edge document) or a persistent graph DB just
   replays the same load + report pipeline rather than maintaining a second
   source of truth.
+
+
+## PostgreSQL driver contract (Phase 8C-B)
+
+All engines share `storage/connection.py`, `storage/db.py` and the version-pinned
+`storage/deadlines.py` adapter. SQLAlchemy async architecture, tables and migrations
+0001–0006 are unchanged. Psycopg/libpq requires verified TLS, SCRAM channel binding,
+UTC and direct sessions. The driver enforces per-I/O deadlines beneath ORM flush,
+commit ownership hooks, streaming fetch, rollback and pool cleanup. Interruption
+abandons the connection and preserves transaction uncertainty; it does not establish
+remote rollback. Managed engine/session contexts own cleanup tasks through repeated
+cancellation. Sessions remain single-consumer objects.
+
+The public pool remains 2 connections with no overflow; collection uses NullPool
+and the existing pinned session-level advisory lock. The dialect's normal
+`do_connect` path must remain intact: a top-level `async_creator` would bypass the
+reconnect-refusal hook. Local CLI, Alembic, initialization and recovery share the
+same TLS/deadline implementation; no migration runs at startup. Detailed limits,
+fault evidence and upgrade constraints are in
+[the migration verification](PHASE8C_B_MIGRATION_VERIFICATION.md).
+
+The PostgreSQL driver uses psycopg's Python implementation with system libpq 18.6.
+`native.py` checks actual loaded library paths, vendor OpenSSL backports, package
+integrity and shared Python TLS linkage before database access. Binary psycopg and
+unreviewed native environments fail closed; neither TLS nor transaction guarantees
+are relaxed to accommodate deployment packaging. The successful audit is cached
+per process, and native package changes require restart and revalidation.

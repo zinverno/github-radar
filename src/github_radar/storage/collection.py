@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import Session
 
 from github_radar.domain import Contributor, Developer
+from github_radar.storage.db import ManagedSession
 from github_radar.storage.models import (
     ContributorRow,
     DeveloperRow,
@@ -24,6 +25,12 @@ from github_radar.storage.models import (
 
 class CollectionLockError(RuntimeError):
     """Collection ownership is unavailable or irreversibly lost for this run."""
+
+    def __init__(self, message: str, *, uncertain: bool = False) -> None:
+        self.database_outcome_uncertain = uncertain
+        if uncertain:
+            message += "; transaction outcome uncertain; inspect receipts; no automatic retry"
+        super().__init__(message)
 
 
 @asynccontextmanager
@@ -41,7 +48,9 @@ async def locked_collection_session(engine: AsyncEngine) -> AsyncIterator[AsyncS
         def refuse_reconnect(*args: object) -> None:
             nonlocal lost
             lost = True
-            raise CollectionLockError("Collection lock ownership lost; reconnection refused")
+            raise CollectionLockError(
+                "Collection lock ownership lost; reconnection refused", uncertain=True,
+            )
 
         def handle_disconnect(context: ExceptionContext) -> Exception | None:
             nonlocal lost
@@ -49,14 +58,16 @@ async def locked_collection_session(engine: AsyncEngine) -> AsyncIterator[AsyncS
                 return context.original_exception
             if context.is_disconnect:
                 lost = True
-                return CollectionLockError("Collection lock ownership lost; backend disconnected")
+                return CollectionLockError(
+                    "Collection lock ownership lost; backend disconnected", uncertain=True,
+                )
             return None
 
         def require_owner(session: Session) -> None:
             nonlocal lost
             if lost or connection.closed or connection.invalidated:
                 lost = True
-                raise CollectionLockError("Collection lock ownership lost")
+                raise CollectionLockError("Collection lock ownership lost", uncertain=True)
             # Use the Session's transaction so the check and commit share the pinned backend.
             owned = session.connection().scalar(text("""
                 SELECT EXISTS (
@@ -73,7 +84,7 @@ async def locked_collection_session(engine: AsyncEngine) -> AsyncIterator[AsyncS
         event.listen(engine.sync_engine, "do_connect", refuse_reconnect)
         event.listen(engine.sync_engine, "handle_error", handle_disconnect, retval=True)
         try:
-            async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+            async with ManagedSession(bind=connection, expire_on_commit=False) as session:
                 event.listen(session.sync_session, "before_commit", require_owner)
                 yield session
         finally:

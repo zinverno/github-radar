@@ -225,8 +225,8 @@ pilot. Existing scoring formulas are unchanged.
 ## Requirements
 
 - Python 3.12+ (managed via `uv`)
-- PostgreSQL 13+ (any recent version works)
-- Node.js 20+ (only needed to build/test the Phase 6 web app)
+- PostgreSQL 16 with verified TLS and SCRAM authentication (tested target)
+- Node.js 24.14.1 / npm 11.11.0 (production build pins)
 - A GitHub token: create a classic token with `public_repo` scope, or a
   fine-grained token with *Public repositories → Metadata: Read*.
 
@@ -234,36 +234,43 @@ pilot. Existing scoring formulas are unchanged.
 
 ```bash
 cp .env.example .env        # then edit .env
-uv sync                     # installs dependencies (Python 3.12 via .python-version)
+uv sync --frozen            # reviewed dependencies (Python via .python-version)
 ```
 
 ### PostgreSQL setup
 
-Create a database and role for the application, plus a **separate database**
-for the destructive integration tests (example):
+The runtime requires `postgresql+psycopg://` URLs, verified TLS and mandatory
+SCRAM channel binding, including on loopback. Use PostgreSQL 16, SCRAM passwords,
+a trusted CA and a certificate matching the connection hostname. See
+[the migration runbook](docs/PHASE8C_B_MIGRATION_VERIFICATION.md) before manually
+updating an existing private `.env`; no database or credentials are rewritten.
 
-```sql
-CREATE ROLE github_radar WITH LOGIN PASSWORD 'a-strong-password';
-CREATE DATABASE github_radar OWNER github_radar;
-CREATE DATABASE github_radar_test OWNER github_radar;
+For a separately authorized new local database, provision its role/database and
+TLS configuration, then set the following in your private `.env` (never in argv):
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://github_radar:URL_ENCODED_PASSWORD@localhost:5432/github_radar?sslmode=verify-full&channel_binding=require&sslrootcert=/ABSOLUTE/PATH/ca.crt
 ```
 
-Then set in `.env`:
+Use a reviewed Debian 12 or Ubuntu 24.04 environment with system libpq 18.6,
+patched vendor OpenSSL and Python dynamically linked to that OpenSSL. The frozen
+package is plain psycopg 3.3.6; bundled psycopg or static Python TLS is refused.
+See the migration report for exact package baselines; a frozen Python install alone
+does not establish native-library safety. No private `.env` is rewritten.
 
-```
-GITHUB_TOKEN=ghp_...
-DATABASE_URL=postgresql+asyncpg://github_radar:a-strong-password@localhost:5432/github_radar
-TEST_DATABASE_URL=postgresql+asyncpg://github_radar:a-strong-password@localhost:5432/github_radar_test
+For the complete test suite, also install PostgreSQL 16 tools, then run:
+
+```sh
+uv run --frozen python -m github_radar.native
+uv run --frozen python -m tests.run_postgres
 ```
 
-`TEST_DATABASE_URL` is used **only** by the PostgreSQL integration tests, which
-create and drop whole schemas (tables + `alembic_version`). It must never point
-at the application database: the test infrastructure refuses to run if
-`TEST_DATABASE_URL` is missing, equals `DATABASE_URL`, names `github_radar`, or
-does not look like a test database (e.g. `github_radar_test` or any
-`*_test`/`test_*` name). An unsafe value fails loudly instead of being
-silently skipped. The application itself places no restriction on
-`DATABASE_URL`.
+This runner creates isolated TLS/SCRAM clusters with random fixture credentials,
+runs all Python tests, checks migrations and performs a verified disposable restore.
+It never uses an operator's application DSN. `RADAR_TEST_POSTGRES_BIN` can select
+an explicit PostgreSQL 16 tools directory. Advanced manually supplied
+`TEST_DATABASE_URL` fixtures must remain disposable; schema-destruction guards
+continue to reject application databases and ambiguous/non-test names.
 
 ### Environment configuration
 
@@ -273,7 +280,7 @@ root — see `.env.example` for every option):
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | GitHub API token (required for discover/update) | — |
-| `DATABASE_URL` | asyncpg PostgreSQL URL for the app (required) | — |
+| `DATABASE_URL` | psycopg PostgreSQL URL for the app (required) | — |
 | `TEST_DATABASE_URL` | separate test DB for destructive integration tests (see PostgreSQL setup) | — |
 | `GITHUB_API_BASE_URL` | API base URL | `https://api.github.com` |
 | `GITHUB_API_VERSION` | API version header | `2022-11-28` |
@@ -433,7 +440,7 @@ database, `DATABASE_URL` itself, or a non-test-looking name) is **rejected
 loudly**, not skipped:
 
 ```bash
-TEST_DATABASE_URL=postgresql+asyncpg://github_radar:...@localhost:5432/github_radar_test \
+TEST_DATABASE_URL=postgresql+psycopg://github_radar:...@localhost:5432/github_radar_test \
   uv run pytest -m integration
 ```
 

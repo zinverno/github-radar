@@ -8,7 +8,7 @@ from github_radar import public_server
 VALID = {
     "DEPLOYMENT_MODE": "public",
     "PUBLIC_ALLOWED_HOSTS": '["radar.example.org"]',
-    "DATABASE_URL": "postgresql+asyncpg://radar_public:secret@db.example.org/beta?sslmode=verify-full",
+    "DATABASE_URL": "postgresql+psycopg://radar_public:secret@db.example.org/beta?sslmode=verify-full",
     "PORT": "10000",
 }
 

@@ -244,7 +244,7 @@ async def test_repeated_transport_errors_raise_network_error(
 async def test_pause_threshold_refuses_further_requests() -> None:
     settings = Settings(
         github_token="t",
-        database_url="postgresql+asyncpg://u:p@localhost/a",
+        database_url="postgresql+psycopg://u:p@localhost/a",
         rate_limit_pause_threshold=50,
         http_max_retries=1,
     )

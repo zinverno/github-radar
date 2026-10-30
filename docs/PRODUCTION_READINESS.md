@@ -1,5 +1,9 @@
 # Phase 8A — production readiness review
 
+Current PostgreSQL runtime/configuration: [Phase 8C-B migration](PHASE8C_B_MIGRATION_VERIFICATION.md).
+The dated acceptance counts below describe their original phase; TLS/SCRAM is now
+mandatory on loopback as well as remote connections. PRE-BETA-UX-001 remains open.
+
 For the current Render/Neon deployment procedure and stricter role/TLS requirements,
 use [Phase 8C-A public deployment](PUBLIC_DEPLOYMENT.md). This document retains
 the historical Phase 8A results and `PRE-BETA-UX-001` record.
@@ -202,7 +206,7 @@ not include it. Do not expose Vite dev/preview servers.
 | --- | --- |
 | `DEPLOYMENT_MODE` | `public` (required explicit opt-in) |
 | `PUBLIC_ALLOWED_HOSTS` | JSON array of exact lowercase hostnames, e.g. `["radar.example.org"]`; no wildcards, scheme or port |
-| `DATABASE_URL` | `postgresql+asyncpg://...` for a dedicated SELECT-only login; external TLS with certificate verification required |
+| `DATABASE_URL` | `postgresql+psycopg://...` for a dedicated SELECT-only login; external TLS with certificate verification required |
 | `GITHUB_TOKEN`, `AI_API_KEY`, `WORKSPACE_ADMIN_TOKEN` | Empty/absent; configuration rejects any nonempty value |
 | `AI_MODEL`, `AI_BASE_URL` and AI tuning | Unneeded; omit from public runtime |
 | `TEST_DATABASE_URL`, `RESTORE_TEST_DATABASE_URL` | Absent from public runtime; reserved for disposable validation |
@@ -232,7 +236,7 @@ never copy the local collector/admin `.env`):
 ```dotenv
 DEPLOYMENT_MODE=public
 PUBLIC_ALLOWED_HOSTS=["radar.example.org"]
-DATABASE_URL=postgresql+asyncpg://radar_public:REPLACE_IN_SECRET_STORE@db.example.org:5432/radar_beta?ssl=verify-full
+DATABASE_URL=postgresql+psycopg://radar_public:REPLACE_IN_SECRET_STORE@db.example.org:5432/radar_beta?sslmode=verify-full&channel_binding=require
 GITHUB_TOKEN=
 AI_API_KEY=
 WORKSPACE_ADMIN_TOKEN=
@@ -354,46 +358,19 @@ empty pre-existing tables. It never creates/drops/resets a database. Restore use
 one transaction, exit-on-error, no owner/ACL/tablespace replay, and no `--clean` or
 `--create`; see [PostgreSQL pg_restore](https://www.postgresql.org/docs/current/app-pgrestore.html).
 
-Use an isolated PostgreSQL cluster, not the application cluster. Example for a
-non-root local operator with PostgreSQL tools installed, port 15439 unused, and
-this checkout's `.env` pointing to the intended source:
+The original Phase 8A plaintext fixture and external-TLS limitation are superseded
+by [the current TLS/SCRAM backup procedure](PUBLIC_DEPLOYMENT.md#independent-backup-and-recovery).
+Use a new isolated local PostgreSQL 16 cluster with a trusted localhost certificate,
+SCRAM passwords and the exact empty `github_radar_restore_check` database. Both
+source and target URLs must use `postgresql+psycopg://`, verified TLS and mandatory
+channel binding. Never point tests at an existing application database.
 
-```sh
-umask 077
-RADAR_DRILL_DIR=$(mktemp -d /tmp/radar-recovery.XXXXXX)
-mkdir "$RADAR_DRILL_DIR/socket"
-python - "$RADAR_DRILL_DIR" <<'PYTHON'
-import getpass, secrets, sys
-from pathlib import Path
-from urllib.parse import quote
-root = Path(sys.argv[1])
-password = secrets.token_hex(32)
-(root / 'password').write_text(password)
-url = (f'postgresql+asyncpg://{quote(getpass.getuser())}:{password}'
-       '@127.0.0.1:15439/github_radar_restore_check')
-(root / 'restore.env').write_text(f'RESTORE_TEST_DATABASE_URL={url}\n')
-PYTHON
-initdb -D "$RADAR_DRILL_DIR/data" --auth-local=trust --auth-host=scram-sha-256 \
-  --pwfile="$RADAR_DRILL_DIR/password" --no-locale --encoding=UTF8
-pg_ctl -D "$RADAR_DRILL_DIR/data" -l "$RADAR_DRILL_DIR/postgres.log" \
-  -o "-h 127.0.0.1 -p 15439 -k $RADAR_DRILL_DIR/socket" -w start
-createdb -h "$RADAR_DRILL_DIR/socket" -p 15439 github_radar_restore_check
-uv run --env-file "$RADAR_DRILL_DIR/restore.env" python -m github_radar.recovery \
-  --output "$RADAR_DRILL_DIR/verified.dump" --confirm-target github_radar_restore_check
-pg_ctl -D "$RADAR_DRILL_DIR/data" -m fast -w stop
-```
-
-Do not reuse an occupied target; retain a failed target privately for investigation
-or start a fresh isolated cluster. Never drop/reset github_radar or github_radar_test
-to make a drill pass. Keep other clients out of the disposable database while the
-drill runs. Snapshot export holds a read transaction for the bounded backup (120s
-subprocess cap); use a maintenance window for larger databases. This is a local
-recovery check. Source URLs with query options (including TLS options) are also
-refused until their asyncpg/libpq mapping is explicitly reviewed; the external
-production backup/restore path therefore remains unverified. It is not retention
-management, encrypted remote storage, point-in-time
-recovery or a test of provider-level disaster recovery. Ownership/ACL restoration,
-large datasets and recovery-time objectives remain untested.
+For automated acceptance on synthetic data only, run
+`uv run --frozen python -m tests.run_postgres`. This creates fresh clusters, applies
+the reviewed migrations locally and verifies snapshot-consistent backup/restore.
+For real owner backups, follow the current runbook's private storage and explicit
+operator authorization requirements. No cloud storage, encrypted independent
+custody or provider recovery has been verified by this local regression.
 
 ## Dependency audit and resource limits
 

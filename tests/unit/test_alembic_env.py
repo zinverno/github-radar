@@ -31,10 +31,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_LOCATION = str(PROJECT_ROOT / "migrations")
 PREPEND_SYS_PATH = str(PROJECT_ROOT / "src")
 
-# An asyncpg-shaped URL that is unreachable: any online attempt must fail with
+# A psycopg-shaped URL that is unreachable: any online attempt must fail with
 # a *connection* error (the URL was used), never a dialect-load error (the
 # placeholder was used).
-UNREACHABLE_URL = "postgresql+asyncpg://u:p@127.0.0.1:1/radar"
+UNREACHABLE_URL = "postgresql+psycopg://u:p@127.0.0.1:1/radar"
 
 DIALECT_PLUGIN_ERROR = "Can't load plugin: sqlalchemy.dialects:driver"
 
@@ -90,9 +90,9 @@ def test_online_migration_uses_database_url_not_placeholder(
     assert proc.returncode != 0
     assert DIALECT_PLUGIN_ERROR not in output
     assert "driver://" not in output
-    # The asyncpg dialect was loaded and a real connection was attempted.
+    # The psycopg dialect was loaded and a real connection was attempted.
     assert any(
-        token in output for token in ("Connect call failed", "Connection refused")
+        token in output for token in ("Database connection failed; details suppressed",)
     )
 
 
@@ -106,7 +106,7 @@ def test_online_migration_without_database_url_fails_clearly(
     assert DIALECT_PLUGIN_ERROR not in output
     assert "driver://" not in output
     assert "DATABASE_URL is not set" in output
-    assert "postgresql+asyncpg://" in output
+    assert "postgresql+psycopg://" in output
 
 
 def test_offline_rendering_uses_database_url(tmp_path: Path) -> None:
