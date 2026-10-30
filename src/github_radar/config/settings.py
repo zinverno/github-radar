@@ -122,8 +122,8 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _validate_database_url(cls, value: str) -> str:
-        if value and not value.startswith("postgresql+asyncpg://"):
-            raise ValueError("DATABASE_URL must use the postgresql+asyncpg:// scheme")
+        if value and not value.startswith("postgresql+psycopg://"):
+            raise ValueError("DATABASE_URL must use the postgresql+psycopg:// scheme")
         if value:
             from sqlalchemy.engine import make_url
 
@@ -209,7 +209,7 @@ class Settings(BaseSettings):
         if not self.database_url:
             raise SettingsError(
                 "DATABASE_URL is not set. Point it at a PostgreSQL database, "
-                "e.g. postgresql+asyncpg://user:pass@localhost:5432/github_radar "
+                "e.g. postgresql+psycopg://user:pass@localhost:5432/github_radar "
                 "(see .env.example)."
             )
         return self.database_url

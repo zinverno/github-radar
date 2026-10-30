@@ -14,6 +14,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from github_radar.api.errors import error_payload
 from github_radar.api.workspace_access import PRIVATE_HEADERS
+from github_radar.storage.deadlines import outcome_uncertain
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +112,13 @@ class DeploymentBoundary:
                 return
         try:
             await self.app(scope, receive, secure_send)
-        except Exception:
+        except Exception as exc:
             # SQL/driver exception text can contain notes or connection details.
             logger.error("HTTP request failed; internal details suppressed")
             if started:
                 raise RuntimeError("HTTP response interrupted") from None
-            await refuse(500, "internal_error", "An internal error occurred.")
+            await refuse(
+                500, "internal_error",
+                "Database transaction outcome uncertain; inspect durable state; do not replay."
+                if outcome_uncertain(exc) else "An internal error occurred.",
+            )

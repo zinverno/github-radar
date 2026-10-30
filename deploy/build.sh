@@ -20,4 +20,5 @@ test "$(node --version)" = v24.14.1
 test "$(npm --version)" = 11.11.0
 # Run from source: avoid an unfrozen, isolated hatchling installation for this app.
 uv sync --frozen --no-dev --no-install-project
+PYTHONPATH=src .venv/bin/python -m github_radar.native
 python deploy/build_frontend.py

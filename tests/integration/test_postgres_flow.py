@@ -1,11 +1,10 @@
 """Optional PostgreSQL integration tests.
 
 These run against a real PostgreSQL database identified by
-``TEST_DATABASE_URL`` (must use the ``postgresql+asyncpg://`` scheme). They are
+``TEST_DATABASE_URL`` (must use the ``postgresql+psycopg://`` scheme). They are
 skipped automatically when the variable is unset:
 
-    TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/github_radar_test \
-        uv run pytest -m integration
+    uv run --frozen python -m tests.run_postgres -m integration
 
 Each test starts from a freshly created schema (tables are dropped afterwards).
 The GitHub layer is mocked via respx — these tests never hit the live API.

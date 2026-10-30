@@ -12,7 +12,6 @@ from typing import Any
 
 import typer
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from github_radar.services.automation import (
     REFRESH_BUDGET,
@@ -28,6 +27,8 @@ from github_radar.services.automation import (
     run_scheduled,
 )
 from github_radar.storage.collection import CollectionLockError
+from github_radar.storage.db import ManagedSession
+from github_radar.storage.deadlines import outcome_uncertain
 from github_radar.util import utcnow
 
 app = typer.Typer(help="Disabled-by-default bounded collection scheduling.", no_args_is_help=True)
@@ -103,10 +104,13 @@ def run(
     except AutomationBlocked as exc:
         emit({"status": "blocked", "reason": str(exc)})
         raise typer.Exit(2) from None
-    except CollectionLockError:
+    except CollectionLockError as exc:
         emit(
             {
                 "status": "blocked",
+                "database_outcome": (
+                    "uncertain" if exc.database_outcome_uncertain else "not_assessed"
+                ),
                 "reason": "Collection lock unavailable or ownership lost; "
                 "inspect receipts before any new run",
             }
@@ -115,11 +119,12 @@ def run(
     except (asyncio.CancelledError, KeyboardInterrupt):
         emit({"status": "interrupted", "reason": "Inspect receipts; no automatic retry"})
         raise typer.Exit(130) from None
-    except Exception:
+    except Exception as exc:
         # Never render DSNs, tokens, SQL parameters, remote exception messages or tracebacks.
         emit(
             {
                 "status": "failed",
+                "database_outcome": "uncertain" if outcome_uncertain(exc) else "not_assessed",
                 "reason": "Invalid plan, database/configuration failure or "
                 "deadline exceeded; inspect receipts and operator diagnostics",
             }
@@ -139,7 +144,7 @@ def status() -> None:
                 await connection.execute(
                     text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 )
-                async with AsyncSession(bind=connection) as session:
+                async with ManagedSession(bind=connection) as session:
                     await check_collector_role(session)
                     result = await operator_report(session, utcnow())
                     result["activation_blockers"] = {

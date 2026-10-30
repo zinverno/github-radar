@@ -7,12 +7,11 @@ import json
 import os
 import re
 import resource
-import secrets
-import shutil
 import socket
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -26,6 +25,7 @@ from github_radar.services.automation import CollectorCredentials, check_collect
 from github_radar.storage.collection import locked_collection_session
 from github_radar.storage.db import make_engine, make_session_factory
 from github_radar.storage.permissions import audit_application_role
+from tests.postgres import PrivateCluster, temporary_postgres
 from tests.unit.test_api_routes import _seed
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,106 +49,11 @@ def run(args, **kwargs):
 
 @pytest.fixture(scope="module")
 def cluster(tmp_path_factory):
-    for binary in ("initdb", "pg_ctl", "psql", "pg_dump", "pg_restore", "openssl"):
-        assert shutil.which(binary), f"Deployment verification requires {binary}"
-    directory = tmp_path_factory.mktemp("radar-deployment")
-    data, ca = directory / "data", directory / "ca.crt"
-    password = secrets.token_hex(24)
-    pwfile = directory / "password"
-    pwfile.write_text(password)
-    pwfile.chmod(0o600)
-    run(
-        [
-            "initdb",
-            "-D",
-            str(data),
-            "-U",
-            "radar_owner",
-            "--auth-local=trust",
-            "--auth-host=scram-sha-256",
-            "--pwfile",
-            str(pwfile),
-        ]
-    )
-    run(
-        [
-            "openssl",
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-days",
-            "1",
-            "-subj",
-            "/CN=Disposable Radar Test CA",
-            "-keyout",
-            str(directory / "ca.key"),
-            "-out",
-            str(ca),
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-        ]
-    )
-    run(
-        [
-            "openssl",
-            "req",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-subj",
-            "/CN=localhost",
-            "-keyout",
-            str(data / "server.key"),
-            "-out",
-            str(directory / "server.csr"),
-        ]
-    )
-    (directory / "extensions").write_text(
-        "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n"
-    )
-    run(
-        [
-            "openssl",
-            "x509",
-            "-req",
-            "-days",
-            "1",
-            "-in",
-            str(directory / "server.csr"),
-            "-CA",
-            str(ca),
-            "-CAkey",
-            str(directory / "ca.key"),
-            "-CAcreateserial",
-            "-extfile",
-            str(directory / "extensions"),
-            "-out",
-            str(data / "server.crt"),
-        ]
-    )
-    (data / "server.key").chmod(0o600)
-    port = free_port()
-    with (data / "postgresql.conf").open("a") as stream:
-        stream.write(
-            f"\nlisten_addresses='127.0.0.1'\nport={port}\n"
-            f"unix_socket_directories='{directory}'\nssl=on\n"
-        )
-    run(["pg_ctl", "-D", str(data), "-l", str(directory / "postgres.log"), "-w", "start"])
-    base = f"postgresql+asyncpg://radar_owner:{password}@localhost:{port}"
-    tls = f"?sslmode=verify-full&sslrootcert={ca}"
-    env = pg_environment(make_url(base + "/postgres" + tls))
-    try:
-        run(
-            ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-c", "CREATE DATABASE github_radar_test"],
-            env=env,
-        )
-        run(
-            ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-c", f"CREATE DATABASE {RESTORE_TARGET}"],
-            env=env,
-        )
-        url = base + "/github_radar_test" + tls
+    with temporary_postgres(tmp_path_factory.mktemp("radar-deployment")) as fixture:
+        url = fixture["owner"]
+        directory = fixture["directory"]
+        ca = Path(fixture["ca"])
+        password = make_url(url).password
         asyncio.run(initialize(url, "github_radar_test"))
         run(
             [
@@ -174,16 +79,16 @@ def cluster(tmp_path_factory):
             timeout=30,
         )
         assert result.returncode == 0, "Test password setup failed"
-        yield {
-            "owner": url,
-            "reader": url.replace("radar_owner:", "radar_public:"),
-            "collector": url.replace("radar_owner:", "github_radar_collector:").split("?")[0],
-            "ca": str(ca),
-            "directory": directory,
-            "restore": base.replace("localhost", "127.0.0.1") + "/" + RESTORE_TARGET,
-        }
-    finally:
-        run(["pg_ctl", "-D", str(data), "-m", "immediate", "-w", "stop"])
+        yield PrivateCluster(
+            {
+                "owner": url,
+                "reader": url.replace("radar_owner:", "radar_public:"),
+                "collector": url.replace("radar_owner:", "github_radar_collector:").split("?")[0],
+                "ca": str(ca),
+                "directory": directory,
+                "restore": fixture["restore"],
+            }
+        )
 
 
 def collector_credentials(cluster, **changes):
@@ -342,7 +247,7 @@ async def test_actual_tls_failures_do_not_connect(cluster, role, failure):
         )
         engine = collector_credentials(cluster, **changes).engine()
     try:
-        with pytest.raises(Exception, match="certificate verify failed"):
+        with pytest.raises(DBAPIError, match="Database connection failed; details suppressed"):
             async with engine.connect():
                 pytest.fail("Unverified TLS connected")
     finally:
@@ -629,4 +534,30 @@ async def test_production_http_spa_privacy_errors_and_reconnect(cluster):
     logged = log.read_text()
     assert "PRIVATE_DEPLOYMENT_SENTINEL" not in logged
     assert make_url(cluster["reader"]).password not in logged
-    assert "SELECT" not in logged and "asyncpg" not in logged
+    assert "SELECT" not in logged and "psycopg" not in logged
+
+
+async def test_required_channel_binding_rejects_tls_without_scram():
+    import psycopg
+
+    from github_radar.storage.connection import connection_options
+    from github_radar.storage.deadlines import DeadlineConnection
+
+    # A separate fixture, restarted with trust auth, proves TLS alone is insufficient.
+    with temporary_postgres() as fixture:
+        data = fixture["directory"] / "data"
+        run(["pg_ctl", "-D", str(data), "-m", "fast", "-w", "stop"])
+        (data / "pg_hba.conf").write_text("hostssl all all 127.0.0.1/32 trust\n")
+        run(["pg_ctl", "-D", str(data), "-l", str(fixture["directory"] / "postgres.log"),
+             "-w", "start"])
+        url, validated = connection_options(fixture["owner"])
+        args: dict[str, Any] = dict(validated)
+        args.update(url.translate_connect_args(username="user", database="dbname"))
+        with pytest.raises(psycopg.OperationalError, match="details suppressed"):
+            await DeadlineConnection.connect(**args)
+        # Negative control only, confined to this test's TLS server: prefer accepts trust.
+        args["channel_binding"] = "prefer"
+        async with await psycopg.AsyncConnection.connect(**args) as weak:
+            assert weak.pgconn.ssl_in_use
+            assert await (await weak.execute("SELECT current_database()" )).fetchone() == (
+                "github_radar_test",)

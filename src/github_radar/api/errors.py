@@ -29,6 +29,7 @@ from github_radar.ai.errors import (
     AIRequestLimitError,
     AIResponseValidationError,
 )
+from github_radar.storage.deadlines import outcome_uncertain
 
 
 class APIError(Exception):
@@ -140,7 +141,7 @@ def _validation_error_handler(
         messages.append(f"{location}: {err.get('msg', 'invalid')}")
     message = messages[0] if messages else "Request validation failed."
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content=error_payload(
             "validation_error",
             message,
@@ -157,6 +158,8 @@ def _unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
         headers={"Cache-Control": "no-store"} if private else None,
         content=error_payload(
             "internal_error",
+            "Database transaction outcome uncertain; inspect durable state; do not replay."
+            if outcome_uncertain(exc) else
             "An internal error occurred; the request was not completed.",
         ),
     )

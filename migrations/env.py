@@ -1,9 +1,9 @@
 """Alembic migration environment.
 
-Uses the same async engine stack as the application (asyncpg). The database URL
+Uses the same async engine stack as the application (psycopg). The database URL
 comes from validated application configuration, in order of precedence:
 
-1. ``-x url=...`` passed on the command line;
+1. Explicit Alembic x-argument override (legacy; never put credentials in argv);
 2. the ``sqlalchemy.url`` main option (e.g. set by ``github-radar init-db``);
 3. the ``DATABASE_URL`` environment variable via :func:`github_radar.config.get_settings`;
 4. otherwise a clear configuration error.
@@ -19,12 +19,10 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from github_radar.config import get_settings
-from github_radar.storage.connection import connection_options
+from github_radar.storage.db import make_engine
 from github_radar.storage.models import Base
 
 config = context.config
@@ -51,8 +49,8 @@ def _resolve_url() -> str:
         return from_env
     raise RuntimeError(
         "DATABASE_URL is not set; cannot run an Alembic migration.\n"
-        "  Export it as postgresql+asyncpg://user:pass@host:port/dbname,\n"
-        "  run `github-radar init-db`, or pass -x url=postgresql+asyncpg://…"
+        "  Export it as postgresql+psycopg://user:pass@host:port/dbname,\n"
+        "  or run `github-radar init-db` with private environment configuration."
     )
 
 
@@ -80,19 +78,12 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     # Build the engine from the *resolved* URL, never from the raw
     # alembic.ini section (which may still carry the driver:// placeholder).
-    section = dict(config.get_section(config.config_ini_section, {}))
-    section["sqlalchemy.url"] = URL
-    url, ssl = connection_options(URL)
-    section["sqlalchemy.url"] = url
-    connectable = async_engine_from_config(
-        section,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-        connect_args={"ssl": ssl},
-    )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
+    connectable = make_engine(URL, null_pool=True)
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:

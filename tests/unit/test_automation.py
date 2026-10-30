@@ -7,7 +7,6 @@ import json
 import os
 import select
 import signal
-import ssl
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -36,7 +35,7 @@ def approved_env():
         "GITHUB_RUN_ATTEMPT": "1",
         "GITHUB_EVENT_NAME": "workflow_dispatch",
         "COLLECTOR_GITHUB_TOKEN": "fake-secret",
-        "COLLECTOR_DATABASE_URL": "postgresql+asyncpg://github_radar_collector:fake@db.invalid/test",
+        "COLLECTOR_DATABASE_URL": "postgresql+psycopg://github_radar_collector:fake@db.invalid/test",
         "RADAR_DISCOVERY_PLAN_SHA256": policy.discovery_plan(NOW)[1],
     }
 
@@ -137,9 +136,9 @@ def test_activations_are_independent():
         "",
         "not-a-url",
         "postgresql://github_radar_collector:x@db.invalid/test",
-        "postgresql+asyncpg://public_reader:x@db.invalid/test",
-        "postgresql+asyncpg://github_radar_collector:x@db.invalid/test?ssl=disable",
-        "postgresql+asyncpg://github_radar_collector@db.invalid/test",
+        "postgresql+psycopg://public_reader:x@db.invalid/test",
+        "postgresql+psycopg://github_radar_collector:x@db.invalid/test?ssl=disable",
+        "postgresql+psycopg://github_radar_collector@db.invalid/test",
     ],
 )
 def test_invalid_credentials_are_not_echoed(value):
@@ -149,23 +148,32 @@ def test_invalid_credentials_are_not_echoed(value):
 
 
 def test_tls_verifies_hostname_and_cannot_keylog(monkeypatch, tmp_path):
-    monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "keylog"))
-    captured = {}
-
-    def create(url, **kwargs):
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(policy, "create_async_engine", create)
+    from github_radar.storage.deadlines import DeadlineConnection
+    keylog = tmp_path / "keys"
+    monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
     credentials = policy.CollectorCredentials.from_environment(approved_env())
-    credentials.engine()
-    context = captured["connect_args"]["ssl"]
-    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
-    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
-    assert not (tmp_path / "keylog").exists()
-    assert captured["connect_args"]["timeout"] == 10
-    assert captured["hide_parameters"] is True
+    engine = credentials.engine()
+    args = {}
+    # Inspect the real engine's dialect path without making a connection.
+    def inspect(dialect, record, positional, parameters):
+        args.update(parameters)
+        raise RuntimeError("stop before transport")
+    from sqlalchemy import event
+    event.listen(engine.sync_engine, "do_connect", inspect)
+    async def check():
+        with pytest.raises(RuntimeError, match="stop before transport"):
+            async with engine.connect():
+                pass
+        await engine.dispose()
+    asyncio.run(check())
+    assert args["async_creator_fn"] == DeadlineConnection.connect
+    assert args["sslmode"] == "verify-full" and args["channel_binding"] == "require"
+    assert args["ssl_min_protocol_version"] == "TLSv1.2"
+    assert args["io_seconds"] == 15 and args["connect_seconds"] == 10
+    assert engine.sync_engine.hide_parameters is True
     assert "fake" not in repr(credentials)
+    assert args["sslkeylogfile"] == "" and args["sslcertmode"] == "disable"
+    assert "timezone=UTC" in args["options"] and not keylog.exists()
 
 
 def test_settings_ignore_local_env_and_redirects(monkeypatch):
@@ -272,6 +280,12 @@ def test_workflow_security_contract(kind, flag, cron):
         assert "github.repository == 'zinverno/github-radar'" in job["if"]
         assert int(job["timeout-minutes"]) <= 8
         assert "env" not in job
+        steps = job["steps"]
+        install = next(s for s in steps if s.get("run") == "sudo bash deploy/install_ci_native.sh")
+        audit = next(s for s in steps if "-m github_radar.native" in s.get("run", ""))
+        protected = next(s for s in steps if s.get("id") in {"gate", "collection"})
+        assert steps.index(install) < steps.index(audit) < steps.index(protected)
+        assert "env" not in install and "env" not in audit
         for step in job["steps"]:
             if "uses" in step:
                 assert len(step["uses"].split("@")[1]) == 40
@@ -375,3 +389,22 @@ automation.app(["run", "refresh", "--live"])
         if process.poll() is None:
             process.kill()
         process.communicate(timeout=10)
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_uncertain_automation_result_is_explicit_and_never_retried(locked, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+    for key, value in approved_env().items():
+        monkeypatch.setenv(key, value)
+    attempts = []
+    failure = (CollectionLockError("PRIVATE", uncertain=True) if locked else
+               OperationalError("PRIVATE", {}, RuntimeError("PRIVATE"),
+                                connection_invalidated=True))
+    def fail(self):
+        attempts.append(True)
+        raise failure
+    monkeypatch.setattr(policy.CollectorCredentials, "engine", fail)
+    result = CliRunner().invoke(app, ["run", "refresh", "--live"])
+    assert result.exit_code == 1 and attempts == [True]
+    assert json.loads(result.output)["database_outcome"] == "uncertain"
+    assert "PRIVATE" not in result.output

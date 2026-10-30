@@ -8,16 +8,15 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from github_radar.services import automation as policy
 from github_radar.services.collection import CollectionService, stored_report
 from github_radar.storage.collection import CollectionLockError, locked_collection_session
-from github_radar.storage.db import make_session_factory
+from github_radar.storage.db import make_engine, make_session_factory
 from github_radar.storage.models import CollectionRunRow, SnapshotRow
 from tests.conftest import BASE_URL
 from tests.integration.safety import validate_test_database_url
@@ -28,6 +27,19 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="test URL unset"),
 ]
+
+
+def restricted_engine(url):
+    engine = make_engine(url, collector=True)
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def restrict(connection, record):
+        cursor = connection.cursor()
+        cursor.execute("SET ROLE github_radar_collector")
+        connection.commit()
+        cursor.close()
+
+    return engine
 
 
 @pytest.fixture
@@ -61,9 +73,7 @@ async def collector(database, settings):
                 text(f"GRANT USAGE ON SEQUENCE {sequence} TO github_radar_collector")
             )
     # Authenticate only to the guarded local cluster; SET ROLE exercises real restricted grants.
-    engine = create_async_engine(
-        url, poolclass=NullPool, connect_args={"server_settings": {"role": policy.COLLECTOR_ROLE}}
-    )
+    engine = restricted_engine(url)
     settings.github_request_budget = policy.REFRESH_BUDGET
     try:
         yield engine
@@ -178,11 +188,7 @@ async def test_parallel_schedules_obey_database_lock(database, collector, settin
         return httpx.Response(200, json=payload)
 
     api_mock.get(BASE_URL + "/repos/octo/one").mock(side_effect=wait)
-    rival = create_async_engine(
-        collector.url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"role": policy.COLLECTOR_ROLE}},
-    )
+    rival = restricted_engine(os.environ["TEST_DATABASE_URL"])
     task = asyncio.create_task(invoke(collector, settings))
     try:
         await asyncio.wait_for(entered.wait(), 10)

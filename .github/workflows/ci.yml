@@ -26,7 +26,7 @@ jobs:
       GITHUB_TOKEN: ''
       AI_API_KEY: ''
       WORKSPACE_ADMIN_TOKEN: ''
-      DATABASE_URL: postgresql+asyncpg://unused@127.0.0.1/unreachable_application
+      DATABASE_URL: postgresql+psycopg://unused@127.0.0.1/unreachable_application
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -42,59 +42,23 @@ jobs:
       - run: npm install --global npm@11.11.0 --ignore-scripts
       - name: Isolated production SPA for real deployment smoke
         run: python deploy/build_frontend.py
-      - name: PostgreSQL tools for disposable server and local TLS smoke
+      - name: Patched system libraries and PostgreSQL 16 (ephemeral CI only)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-16 postgresql-client-16
+          sudo bash deploy/install_ci_native.sh
+          sudo apt-get install -y --no-install-recommends postgresql-16 postgresql-client-16
           echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
-      - name: Start disposable PostgreSQL with a fresh job-only password
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os, secrets
-          password = secrets.token_hex(32)
-          print(f'::add-mask::{password}')
-          with open(os.environ['GITHUB_ENV'], 'a') as stream:
-              stream.write(f'POSTGRES_PASSWORD={password}\n')
-              stream.write(f'TEST_DATABASE_URL=postgresql+asyncpg://radar_ci:{password}@127.0.0.1:55432/github_radar_test\n')
-              stream.write(f'RESTORE_TEST_DATABASE_URL=postgresql+asyncpg://radar_ci:{password}@127.0.0.1:55432/github_radar_restore_check\n')
-          PY
-      - name: Wait for disposable PostgreSQL
-        shell: bash
-        run: |
-          docker run --detach --name radar-ci-postgres \
-            --env POSTGRES_PASSWORD --env POSTGRES_USER=radar_ci \
-            --env POSTGRES_DB=github_radar_test \
-            --publish 127.0.0.1:55432:5432 postgres:16
-          for attempt in {1..30}; do
-            if docker exec radar-ci-postgres pg_isready -h 127.0.0.1 -U radar_ci -d github_radar_test; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "PostgreSQL did not become ready after ${attempt} attempts" >&2
-          exit 1
-      - run: uv run ruff check .
-      - run: uv run mypy src tests
+      - name: Verify actual loaded libpq, Python TLS and vendor OpenSSL backport
+        run: uv run --frozen python -m github_radar.native
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen mypy src tests
       - name: Secret-free scheduling previews (no database or GitHub requests)
         run: |
           uv run --frozen github-radar automation run refresh
           uv run --frozen github-radar automation run discover
-      - name: Python unit and guarded PostgreSQL tests (no live GitHub)
-        run: uv run pytest -q
-      - name: Validate migration head and full recovery on disposable databases
-        shell: bash
-        run: |
-          docker exec radar-ci-postgres createdb -U radar_ci github_radar_restore_check
-          export DATABASE_URL="$TEST_DATABASE_URL"
-          uv run alembic upgrade head
-          uv run alembic check
-          uv run python -m github_radar.recovery --output "$RUNNER_TEMP/ci-recovery.dump" --confirm-target github_radar_restore_check
+      - name: Full tests, migration and recovery on fresh PostgreSQL 16 TLS/SCRAM clusters
+        run: uv run --frozen python -m tests.run_postgres
       - name: Locked Python dependency audit
         run: uv audit --locked
-      - name: Remove disposable PostgreSQL
-        if: always()
-        run: docker rm --force radar-ci-postgres
   frontend:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

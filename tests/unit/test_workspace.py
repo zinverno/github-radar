@@ -271,7 +271,7 @@ def test_cli_refuses_remote_bind_and_disables_forwarded_header_trust(monkeypatch
 
     cli = importlib.import_module("github_radar.cli.app")
     settings = workspace_settings()
-    settings.database_url = "postgresql+asyncpg://unused:unused@localhost/test_radar"
+    settings.database_url = "postgresql+psycopg://unused:unused@localhost/test_radar"
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     run = Mock()
     monkeypatch.setattr("uvicorn.run", run)

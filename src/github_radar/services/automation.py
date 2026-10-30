@@ -13,8 +13,7 @@ from uuid import UUID
 
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from github_radar.config.settings import GitHubRequestLimits, Settings
 from github_radar.discovery.planning import (
@@ -28,7 +27,8 @@ from github_radar.github.client import GitHubClient
 from github_radar.services.collection import CollectionService, stored_report
 from github_radar.services.quality import load_quality_report
 from github_radar.storage.collection import locked_collection_session
-from github_radar.storage.connection import direct_url, verified_context
+from github_radar.storage.connection import direct_url
+from github_radar.storage.db import make_engine
 from github_radar.storage.models import CollectionRunRow, RepositoryRow, SnapshotRow
 from github_radar.storage.permissions import audit_application_role
 from github_radar.util import utcnow
@@ -149,7 +149,7 @@ class CollectorCredentials:
         try:
             url = direct_url(value)
             valid = (
-                url.drivername == "postgresql+asyncpg"
+                url.drivername == "postgresql+psycopg"
                 and url.username == COLLECTOR_ROLE
                 and url.password
                 and url.host
@@ -166,24 +166,7 @@ class CollectorCredentials:
         return cls(value, env.get("COLLECTOR_GITHUB_TOKEN", ""), env.get("COLLECTOR_CA_PEM", ""))
 
     def engine(self) -> AsyncEngine:
-        # An explicit context avoids SSLKEYLOGFILE and forbids URL SSL overrides.
-        context = verified_context(ca_pem=self.ca_pem)
-        return create_async_engine(
-            self.database_url,
-            poolclass=NullPool,
-            hide_parameters=True,
-            connect_args={
-                "ssl": context,
-                "timeout": 10,
-                "command_timeout": 15,
-                "server_settings": {
-                    "statement_timeout": "15000",
-                    "lock_timeout": "5000",
-                    "application_name": "github-radar-collector",
-                    "search_path": "pg_catalog,public",
-                },
-            },
-        )
+        return make_engine(self.database_url, collector=True, ca_pem=self.ca_pem)
 
     def settings(self, budget: GitHubRequestLimits) -> Settings:
         return Settings(  # type: ignore[call-arg]  # pydantic-settings runtime-only _env_file

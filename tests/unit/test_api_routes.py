@@ -47,7 +47,7 @@ def _sqlite_bigint_as_integer(element: Any, compiler: Any, **kw: Any) -> str:
 # never opens it because we inject our own engine/ session factory.
 TEST_SETTINGS = Settings(
     github_token="test-token",
-    database_url="postgresql+asyncpg://u:p@localhost:5432/radar",
+    database_url="postgresql+psycopg://u:p@localhost:5432/radar",
     github_api_base_url="https://api.github.com",
     http_max_retries=2,
     rate_limit_pause_threshold=0,

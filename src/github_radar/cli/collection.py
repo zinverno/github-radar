@@ -11,12 +11,11 @@ from typing import Any
 import typer
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from github_radar.config import SettingsError, get_settings
 from github_radar.discovery.planning import load_discovery_config
 from github_radar.services.quality import load_collection_stats, load_quality_report
-from github_radar.storage.db import make_engine
+from github_radar.storage.db import ManagedSession, make_engine
 from github_radar.util import utcnow
 
 app = typer.Typer(
@@ -77,7 +76,7 @@ def _run(
                     await connection.execute(
                         text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                     )
-                    async with AsyncSession(bind=connection) as session:
+                    async with ManagedSession(bind=connection) as session:
                         if catalog is not None:
                             assert assessed_at is not None
                             return await load_quality_report(

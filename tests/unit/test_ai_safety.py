@@ -46,8 +46,8 @@ def test_redact_secrets_hides_credentials_not_short_values() -> None:
 
 
 def test_secrets_present_reports_found_secrets() -> None:
-    found = secrets_present("db postgresql+asyncpg://u:p@h/db", ["postgresql+asyncpg://u:p@h/db"])
-    assert found == ("postgresql+asyncpg://u:p@h/db",)
+    found = secrets_present("db postgresql+psycopg://u:p@h/db", ["postgresql+psycopg://u:p@h/db"])
+    assert found == ("postgresql+psycopg://u:p@h/db",)
 
 
 def test_configured_secrets_include_only_nonempty() -> None:
@@ -55,14 +55,14 @@ def test_configured_secrets_include_only_nonempty() -> None:
 
     settings = Settings(
         github_token="ghp_long_secret_value",
-        database_url="postgresql+asyncpg://u:p@localhost/radar",
+        database_url="postgresql+psycopg://u:p@localhost/radar",
         ai_api_key="sk-long-test-key",
         github_api_base_url=BASE_URL,
     )
     secrets = configured_secrets(settings)
     assert secrets == (
         "ghp_long_secret_value",
-        "postgresql+asyncpg://u:p@localhost/radar",
+        "postgresql+psycopg://u:p@localhost/radar",
         "sk-long-test-key",
     )
 

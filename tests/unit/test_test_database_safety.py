@@ -18,17 +18,17 @@ from tests.integration.safety import (
     validate_test_database_url,
 )
 
-APP_URL = "postgresql+asyncpg://github_radar:secret@localhost:5432/github_radar"
-TEST_URL = "postgresql+asyncpg://github_radar:secret@localhost:5432/github_radar_test"
+APP_URL = "postgresql+psycopg://github_radar:secret@localhost:5432/github_radar"
+TEST_URL = "postgresql+psycopg://github_radar:secret@localhost:5432/github_radar_test"
 
 
-def test_extract_database_name_parses_asyncpg_url() -> None:
-    url = "postgresql+asyncpg://u:p@localhost:5432/radar_test"
+def test_extract_database_name_parses_psycopg_url() -> None:
+    url = "postgresql+psycopg://u:p@localhost:5432/radar_test"
     assert extract_database_name(url) == "radar_test"
 
 
 def test_extract_database_name_handles_query_string() -> None:
-    url = "postgresql+asyncpg://u:p@localhost/github_radar_test?sslmode=disable"
+    url = "postgresql+psycopg://u:p@localhost/github_radar_test?sslmode=disable"
     assert extract_database_name(url) == "github_radar_test"
 
 
@@ -39,7 +39,7 @@ def test_accepts_github_radar_test_without_app_url() -> None:
 
 def test_accepts_documented_test_name_conventions() -> None:
     for db in ("radar_test", "test_radar", "ci_github_radar_test"):
-        validate_test_database_url(test_url=f"postgresql+asyncpg://u:p@h/{db}")
+        validate_test_database_url(test_url=f"postgresql+psycopg://u:p@h/{db}")
 
 
 def test_rejects_missing_test_url() -> None:
@@ -51,23 +51,23 @@ def test_rejects_missing_test_url() -> None:
 
 def test_rejects_url_without_database_name() -> None:
     with pytest.raises(UnsafeTestDatabaseError, match="does not name a database"):
-        validate_test_database_url(test_url="postgresql+asyncpg://u:p@localhost:5432/")
+        validate_test_database_url(test_url="postgresql+psycopg://u:p@localhost:5432/")
 
 
 def test_rejects_normal_application_database() -> None:
     with pytest.raises(UnsafeTestDatabaseError, match="normal application database"):
-        validate_test_database_url(test_url="postgresql+asyncpg://u:p@localhost:5432/github_radar")
+        validate_test_database_url(test_url="postgresql+psycopg://u:p@localhost:5432/github_radar")
 
 
 def test_rejects_test_url_equal_to_app_url() -> None:
-    same = "postgresql+asyncpg://u:p@localhost:5432/radar_test"
+    same = "postgresql+psycopg://u:p@localhost:5432/radar_test"
     with pytest.raises(UnsafeTestDatabaseError, match="same database as DATABASE_URL"):
         validate_test_database_url(test_url=same, app_url=same)
 
 
 def test_rejects_test_url_equal_to_app_database_even_with_different_credentials() -> None:
-    app = "postgresql+asyncpg://other:pass@remote:5432/radar_test"
-    test = "postgresql+asyncpg://u:p@localhost:5432/radar_test"
+    app = "postgresql+psycopg://other:pass@remote:5432/radar_test"
+    test = "postgresql+psycopg://u:p@localhost:5432/radar_test"
     with pytest.raises(UnsafeTestDatabaseError, match="same database as DATABASE_URL"):
         validate_test_database_url(test_url=test, app_url=app)
 
@@ -75,7 +75,7 @@ def test_rejects_test_url_equal_to_app_database_even_with_different_credentials(
 def test_rejects_non_test_looking_database_name() -> None:
     for db in ("radar", "github_radar_ci", "prod", "staging_radar"):
         with pytest.raises(UnsafeTestDatabaseError, match="does not look like a test database"):
-            validate_test_database_url(test_url=f"postgresql+asyncpg://u:p@localhost:5432/{db}")
+            validate_test_database_url(test_url=f"postgresql+psycopg://u:p@localhost:5432/{db}")
 
 
 def test_guard_does_not_restrict_production_database_url() -> None:

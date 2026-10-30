@@ -65,11 +65,15 @@ using the actual invocation's UTC date. The JSON preview and full plan stored in
 the existing receipt show the resulting queries, budgets and derived totals.
 There is no workflow query, path, branch or repository-list input.
 
-The wrapper has an additional 330-second execution timeout to cover preflight and
-cleanup; the collector's 300-second deadline remains unchanged. Database connection
-timeout is 10s; statement/command timeout 15s; database lock wait 5s. Actions plan
-jobs have a 3-minute timeout and collection jobs an 8-minute timeout including
-installation, diagnostics and cleanup. No whole-run retries are performed.
+The wrapper retains its 330-second cooperative execution timer; each scheduled
+collection has a 300-second inner limit. A pinned psycopg/libpq connection has
+10 seconds for DNS/authentication and 15 seconds per client I/O operation, including
+ownership checks, COMMIT and ROLLBACK. Server statement (15s), lock (5s) and idle
+transaction (30s) limits are additional protection. A timer is not proof of rollback;
+cleanup has its own driver deadlines and may add a bounded tail to the outer timer.
+Actions plan jobs retain 3-minute limits and collection jobs 8-minute limits,
+including installation. No whole-run retry is introduced.
+
 
 ## GitHub Actions setup and activation (operator-only, not performed)
 
@@ -95,7 +99,7 @@ turn a collector failure or interruption into a successful Actions step.
 
    | Secret | Purpose |
    | --- | --- |
-   | `COLLECTOR_DATABASE_URL` | `postgresql+asyncpg://github_radar_collector:<URL-encoded-password>@<direct-host>:5432/<database>`; no URL query parameters |
+   | `COLLECTOR_DATABASE_URL` | `postgresql+psycopg://github_radar_collector:<URL-encoded-password>@<direct-host>:5432/<database>`; no URL query parameters |
    | `COLLECTOR_GITHUB_TOKEN` | Separate GitHub credential restricted to reading public repository metadata; no private-repository access or write scopes needed |
    | `COLLECTOR_CA_PEM` | Optional provider CA PEM when system roots do not verify the database certificate |
 
@@ -142,8 +146,28 @@ by repository YAML alone and have **not** been provisioned here.
 
 Use external PostgreSQL with a **direct, session-stable endpoint**. PgBouncer
 transaction/statement pooling is unsupported. The wrapper uses a dedicated
-non-pooling SQLAlchemy engine with an explicit SSL context requiring certificate
-verification, hostname checking and TLS 1.2 or newer. URL SSL overrides are rejected.
+non-pooling SQLAlchemy engine with explicit libpq TLS options requiring certificate
+verification, hostname checking, TLS 1.2 or newer and mandatory SCRAM channel
+binding (`require`) through psycopg 3.3.6 (Python implementation) / system libpq 18.6. All sessions
+are explicitly UTC. URL security overrides are rejected: this query-free collector
+contract sets the approved options in code. Ambient `PG*` settings are refused;
+optional `COLLECTOR_CA_PEM` is materialized in a private temporary CA bundle only
+for authentication. Install with `uv sync --frozen`; other driver/libpq versions
+fail closed until the adapter is reviewed and tested. Bundled psycopg is forbidden.
+Actions installs signed system packages and runs the native audit before any
+collection credentials enter a step. Ubuntu 24.04 requires the fixed libssl3t64
+3.0.13-0ubuntu3.16 baseline; local Debian 12 requires libssl3 3.0.22-1~deb12u2.
+Python TLS must share the verified system libraries. Hosted execution is still
+unverified and activation gates remain closed. [Native evidence and limitations](PHASE8C_B_MIGRATION_VERIFICATION.md).
+
+An I/O timeout/cancellation closes the local connection immediately. PostgreSQL may
+still be executing, or COMMIT may already have succeeded. The run is marked
+**uncertain** on ownership loss and cannot reconnect to authorize more writes.
+Earlier committed work stays durable; a lost acknowledgement can leave a truthful
+unfinished `running` receipt. Never treat it as rollback or automatically replay it.
+Healthy HTTP cancellation can still record a confirmed `partial` receipt. Review
+stored receipts/rows and explicitly acknowledge unfinished work before a separately
+authorized new run. See [migration evidence and rollback](PHASE8C_B_MIGRATION_VERIFICATION.md).
 System trust roots are used, optionally extended by `COLLECTOR_CA_PEM`.
 An endpoint name or a successful connection cannot prove absence of a proxy;
 the operator must confirm topology with the provider. Lock-loss checks still apply.
