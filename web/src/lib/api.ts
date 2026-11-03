@@ -1,3 +1,5 @@
+import { STATIC_PREVIEW } from "./preview";
+
 /** Uniform error envelope returned by the FastAPI backend. */
 export interface ApiErrorBody {
   error: {
@@ -26,6 +28,10 @@ export class ApiError extends Error {
  * envelope, so every failure surfaces as a typed {@link ApiError}.
  */
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  if (STATIC_PREVIEW) {
+    const { previewResponse } = await import("../preview/api");
+    return previewResponse(path, init) as T;
+  }
   const response = await fetch(`/api/v1${path}`, {
     headers: { Accept: "application/json" },
     ...init,

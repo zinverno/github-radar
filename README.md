@@ -1,5 +1,8 @@
 # github-radar
 
+Static **v0.1.0-preview**: [synthetic demo, local build and Pages handoff](docs/STATIC_PREVIEW.md).
+Reuses the existing UI with prominent DEMO DATA labels; no live backend or deployment.
+
 Public beta preparation: [Render Free + Neon Free deployment runbook](docs/PUBLIC_DEPLOYMENT.md).
 Provisioning, deployment and collection activation require separate operator approval.
 

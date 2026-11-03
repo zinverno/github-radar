@@ -6,6 +6,7 @@ import { bridges, crossTopicBridges } from "../lib/endpoints";
 import { plain, score } from "../lib/format";
 import type { DeveloperBridge, GraphConfidence } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
+import { STATIC_PREVIEW } from "../lib/preview";
 
 interface BridgeRowProps {
   login: string;
@@ -85,7 +86,7 @@ export function BridgesPage() {
       </header>
 
       {data && data.items.length === 0 ? (
-        <EmptyState>No bridging developers found yet.</EmptyState>
+        <EmptyState>{STATIC_PREVIEW ? "No developer relationships are included in this demo. Bridge results are intentionally empty." : "No bridging developers found yet."}</EmptyState>
       ) : (
         <section className="card">
           <header className="card-header">

@@ -5,6 +5,7 @@ import { Pager } from "../components/Pager";
 import { listDevelopers } from "../lib/endpoints";
 import { dateTime, score } from "../lib/format";
 import { useAsync } from "../lib/useAsync";
+import { STATIC_PREVIEW } from "../lib/preview";
 
 const LIMIT = 40;
 
@@ -27,7 +28,7 @@ export function DevelopersPage() {
       </header>
 
       {data.items.length === 0 ? (
-        <EmptyState>No developers observed yet.</EmptyState>
+        <EmptyState>{STATIC_PREVIEW ? "No developer profiles are included in this demo. Explore the fictional repositories and topics instead." : "No developers observed yet."}</EmptyState>
       ) : (
         <section className="card">
           <table className="data">
