@@ -3,8 +3,9 @@ on:
   pull_request:
     paths:
       - 'web/**'
-      - '.github/workflows/static-preview.yml'
-      - 'docs/STATIC_PREVIEW.md'
+      - '.github/workflows/static-preview*.yml'
+      - 'docs/security/static-preview*'
+      - 'docs/STATIC_PREVIEW*.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -25,17 +26,31 @@ jobs:
       - run: npm install --global npm@11.21.1 --ignore-scripts
       - run: mkdir -p ../build/preview-evidence
       - id: install
-        run: npm ci --ignore-scripts
+        run: env -i PATH="$PATH" npm --userconfig=/dev/null ci --ignore-scripts
       - run: npm run lint && npm run typecheck && npm test
-      - run: npm run build:preview
+      - run: env -i PATH="$PATH" npm --userconfig=/dev/null run build:preview
       - id: artifact
         run: node scripts/audit-preview.mjs dist-preview > ../build/preview-evidence/artifact.json
       - name: Production dependency audit (mandatory)
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: npm audit --omit=dev --json > ../build/preview-evidence/npm-production.json
-      - name: Full dependency audit (no exceptions)
+        run: |
+          status=0
+          env -i PATH="$PATH" npm --userconfig=/dev/null audit --omit=dev --json > ../build/preview-evidence/npm-production.json || status=$?
+          printf '%s\n' "$status" > ../build/preview-evidence/npm-production.exit
+          exit "$status"
+      - name: Full dependency audit (retain raw failure; strict gate below)
+        continue-on-error: true
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: npm audit --json > ../build/preview-evidence/npm-full.json
+        run: |
+          status=0
+          env -i PATH="$PATH" npm --userconfig=/dev/null audit --json > ../build/preview-evidence/npm-full.json || status=$?
+          printf '%s\n' "$status" > ../build/preview-evidence/npm-full.exit
+          exit "$status"
+      - name: Preview security decision (unapproved exceptions fail)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.artifact.outcome == 'success' }}
+        run: |
+          git -C .. diff --exit-code
+          node scripts/preview-security.mjs
       - name: Retain candidate for review even when dependency audit fails
         if: ${{ !cancelled() && steps.artifact.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -50,5 +65,5 @@ jobs:
         with:
           name: static-preview-audit-evidence
           path: build/preview-evidence/
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error

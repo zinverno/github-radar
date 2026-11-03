@@ -18,7 +18,16 @@ export function auditPreview(directory) {
     const path = resolve(directory, name), stat = lstatSync(path);
     assert(stat.isFile() && !stat.isSymbolicLink(), `Non-regular artifact: ${name}`);
     const bytes = readFileSync(path);
-    assert(!forbidden.test(bytes.toString()), `Forbidden content in ${name}`);
+    const content = bytes.toString();
+    assert(!forbidden.test(content), `Forbidden content in ${name}`);
+    // Library documentation, XML namespaces and the router's inert fallback origin.
+    const allowed = new Set(["http://localhost", "http://www.w3.org/1998/Math/MathML",
+      "http://www.w3.org/1999/xhtml", "http://www.w3.org/1999/xlink", "http://www.w3.org/2000/svg",
+      "http://www.w3.org/XML/1998/namespace", "https://github.com/ungap/url-search-params.",
+      "https://reactjs.org/docs/error-decoder.html?invariant=", "https://reactrouter.com/en/main/routers/picking-a-router."]);
+    for (const match of content.matchAll(/(?:https?|wss?|ftp):\/\/[^\s"'`<>\\]+/g)) {
+      assert(allowed.has(match[0]), `Unexpected URL in ${name}`);
+    }
     return { file: name, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
   });
   const html = readFileSync(resolve(directory, "index.html"), "utf8");

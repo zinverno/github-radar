@@ -18,6 +18,11 @@ test("artifact gate accepts only labeled static files and rejects leaks, maps an
       assert.throws(() => auditPreview(dir), /Forbidden content/);
     }
     writeFileSync(join(dir, "assets/index-test.js"), "");
+    for (const url of ["https://unexpected.example/collect", "wss://unexpected.example", "http://localhost:8000/api"]) {
+      writeFileSync(join(dir, "assets/index-test.js"), url);
+      assert.throws(() => auditPreview(dir), /Unexpected URL/);
+    }
+    writeFileSync(join(dir, "assets/index-test.js"), "");
     writeFileSync(join(dir, "assets/index-test.js.map"), "{}");
     assert.throws(() => auditPreview(dir), /Unexpected artifact/);
     rmSync(join(dir, "assets/index-test.js.map"));

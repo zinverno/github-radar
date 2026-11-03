@@ -61,10 +61,12 @@ public-directory copying and source maps. Its CSP blocks connections and form
 submission; the adapter rejects writes and unknown routes without calling fetch.
 
 The review-only workflow `.github/workflows/static-preview.yml` builds/tests/scans
-the candidate and retains full and production npm audits independently. Failed
-audits fail the job. Candidate/audit artifacts are still retained for seven days
-for inspection; retaining an artifact does not approve its publication. There is
-no deployment job, Pages permission, OIDC permission or automatic release/tag.
+the candidate and retains full and production npm audits independently. Its strict
+preview decision gate remains blocked by the unapproved moderate exception and
+separate npm-toolchain highs. Candidate artifacts are retained for seven days;
+complete audit evidence for 90 days. Retention does not approve publication.
+The separate manually triggered Pages workflow is prepared but has not been run.
+See [the security decision and operator procedure](STATIC_PREVIEW_SECURITY.md).
 
 ## GitHub Pages handoff
 
@@ -76,10 +78,11 @@ This is a target URL, **not an assertion that a site is live**.
 Topic links, filter URLs and the skip link were checked under that project path
 using a plain static HTTP server without an SPA fallback.
 
-After separate publication/security approval, the operator must configure the
-repository's Pages source and publish exactly the reviewed directory contents
-(through a separately approved Pages workflow or Pages branch). No Pages setting,
-publishing branch or environment was created here. A different project path or
+After separate publication/security approval, follow the protected manual
+workflow and required settings in [STATIC_PREVIEW_SECURITY.md](STATIC_PREVIEW_SECURITY.md).
+It rebuilds on reviewed main and compares every file against the committed
+manifest before publication. No Pages setting, publishing branch or environment
+was created here. A different project path or
 custom domain requires reviewing the Vite base and rebuilding/rescanning.
 [Vite's Pages guidance](https://vite.dev/guide/static-deploy.html#github-pages)
 and [HashRouter](https://reactrouter.com/api/declarative-routers/HashRouter)

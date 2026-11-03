@@ -7,11 +7,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:preview": "vite build --mode static-preview",
+    "build:preview": "node scripts/build-preview.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run && node --test scripts/audit-preview.check.mjs",
+    "test": "vitest run && node --test scripts/*.check.mjs",
     "audit:preview": "node scripts/audit-preview.mjs dist-preview"
   },
   "dependencies": {
