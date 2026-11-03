@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
+import { BrowserRouter, HashRouter } from "react-router-dom";
+import { STATIC_PREVIEW } from "./lib/preview";
 
 import { App } from "./App";
 import "./styles.css";
@@ -10,10 +11,11 @@ if (!root) {
   throw new Error("Missing #root element");
 }
 
+const Router = STATIC_PREVIEW ? HashRouter : BrowserRouter;
 createRoot(root).render(
   <StrictMode>
-    <BrowserRouter>
+    <Router>
       <App />
-    </BrowserRouter>
+    </Router>
   </StrictMode>,
 );

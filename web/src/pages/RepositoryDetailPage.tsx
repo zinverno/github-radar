@@ -139,6 +139,7 @@ export function RepositoryDetailPage() {
               <EmptyState>No contributors observed.</EmptyState>
             </div>
           ) : (
+            <div className="table-scroll" role="region" aria-label="Contributors table" tabIndex={0}>
             <table className="data">
               <thead>
                 <tr>
@@ -159,6 +160,7 @@ export function RepositoryDetailPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </section>
       </section>

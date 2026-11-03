@@ -16,6 +16,7 @@ import {
 } from "../lib/repoFilters";
 import type { RepositorySummary } from "../lib/types";
 import { useAsync } from "../lib/useAsync";
+import { STATIC_PREVIEW } from "../lib/preview";
 
 const LIMIT = 25;
 
@@ -75,12 +76,12 @@ export function RepositoriesPage() {
   const patch = (next: Partial<RepoFilters>) =>
     setSearchParams(repoFiltersToSearchParams({ ...filters, ...next }));
 
-  if (loading) return <Loading label="Loading repositories…" />;
+  if (loading && !data) return <Loading label="Loading repositories…" />;
   if (error) return <ErrorState error={error} onRetry={reload} />;
   if (!data) return <EmptyState>No data yet.</EmptyState>;
 
   return (
-    <div>
+    <div aria-busy={loading}>
       <header className="page-head">
         <div>
           <h1>Repositories</h1>
@@ -174,7 +175,7 @@ export function RepositoriesPage() {
       </form>
 
       {data.items.length === 0 ? (
-        data.total === 0 && data.offset === 0 ? (
+        !STATIC_PREVIEW && data.total === 0 && data.offset === 0 ? (
           <EmptyState>
             No tracked repositories yet — run <code>github-radar discover</code> first.
           </EmptyState>

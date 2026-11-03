@@ -1,3 +1,5 @@
+import { STATIC_PREVIEW } from "../lib/preview";
+
 export function StaleBadge({ days }: { days: number }) {
   if (days <= 0) return null;
   const label = days === 1 ? "1 day stale" : `${days} days stale`;
@@ -18,6 +20,7 @@ export function FreshnessNote({
   observedAt: string;
   staleDays: number | null;
 }) {
+  if (STATIC_PREVIEW) return <p className="muted">Demo snapshot: {observedAt}. Fixed fictional data; no live updates.</p>;
   if (staleDays == null || staleDays <= 0) {
     return <p className="muted">Dataset is up to date as of {observedAt}.</p>;
   }

@@ -273,7 +273,7 @@ export function EcoGraph({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdg
           ref={svgRef}
           className={`graph-canvas${dragging ? " is-dragging" : ""}`}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-          role="img"
+          role="group"
           aria-label={`Ecosystem graph with ${shownLabels} nodes and ${projection.visibleEdgeCount} visible edges. Wheel to zoom, drag to pan, +/- and arrow keys from the keyboard, press 0 to reset.`}
           tabIndex={0}
           onPointerDown={onPointerDown}
@@ -343,7 +343,7 @@ export function EcoGraph({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdg
                   onFocus={() => setHoveredKey(key)}
                   onBlur={() => setHoveredKey((current) => (current === key ? null : current))}
                   role="button"
-                  aria-label={node.label}
+                  aria-label={revealed || label === node.label ? node.label : `${label} — ${node.label}`}
                   tabIndex={0}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {

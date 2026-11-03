@@ -1,0 +1,57 @@
+{
+  "version": "0.1.0",
+  "name": "github-radar-web",
+  "dependencies": {
+    "eslint": {
+      "version": "9.39.5",
+      "resolved": "https://registry.npmjs.org/eslint/-/eslint-9.39.5.tgz",
+      "overridden": false,
+      "dependencies": {
+        "@eslint/config-array": {
+          "version": "0.21.2",
+          "resolved": "https://registry.npmjs.org/@eslint/config-array/-/config-array-0.21.2.tgz",
+          "overridden": false,
+          "dependencies": {
+            "minimatch": {
+              "version": "3.1.5"
+            }
+          }
+        },
+        "@eslint/eslintrc": {
+          "version": "3.3.7",
+          "resolved": "https://registry.npmjs.org/@eslint/eslintrc/-/eslintrc-3.3.7.tgz",
+          "overridden": false,
+          "dependencies": {
+            "minimatch": {
+              "version": "3.1.5"
+            }
+          }
+        },
+        "minimatch": {
+          "version": "3.1.5",
+          "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-3.1.5.tgz",
+          "overridden": false
+        }
+      }
+    },
+    "typescript-eslint": {
+      "version": "8.71.1",
+      "resolved": "https://registry.npmjs.org/typescript-eslint/-/typescript-eslint-8.71.1.tgz",
+      "overridden": false,
+      "dependencies": {
+        "@typescript-eslint/typescript-estree": {
+          "version": "8.71.1",
+          "resolved": "https://registry.npmjs.org/@typescript-eslint/typescript-estree/-/typescript-estree-8.71.1.tgz",
+          "overridden": false,
+          "dependencies": {
+            "minimatch": {
+              "version": "10.2.6",
+              "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-10.2.6.tgz",
+              "overridden": false
+            }
+          }
+        }
+      }
+    }
+  }
+}

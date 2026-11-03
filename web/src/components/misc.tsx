@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import type { ConfidenceLevel } from "../lib/types";
+import { Link } from "react-router-dom";
+import { STATIC_PREVIEW } from "../lib/preview";
 
 export function Property({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -14,9 +16,9 @@ export function Tag({ children, href }: { children: ReactNode; href?: string }) 
   const className = "tag";
   if (href) {
     return (
-      <a className={className} href={href}>
+      <Link className={className} to={href}>
         {children}
-      </a>
+      </Link>
     );
   }
   return <span className={className}>{children}</span>;
@@ -29,6 +31,7 @@ export function LevelTag({ level }: { level: ConfidenceLevel }) {
 }
 
 export function GithubLink({ fullName }: { fullName: string }) {
+  if (STATIC_PREVIEW) return <span>{fullName}</span>;
   return (
     <a className="external-link" href={`https://github.com/${fullName}`}>
       {fullName}

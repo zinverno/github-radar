@@ -1,0 +1,115 @@
+name: Publish reviewed static preview
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: 'Full reviewed main commit SHA (must equal the selected main revision)'
+        required: true
+        type: string
+      confirm_publication:
+        description: 'I authorize publication of the reviewed DEMO DATA preview'
+        required: true
+        default: false
+        type: boolean
+permissions: {}
+concurrency:
+  group: static-preview-pages
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: >-
+      github.repository == 'zinverno/github-radar' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.reviewed_sha == github.sha && inputs.confirm_publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      verified_at: ${{ steps.security.outputs.verified_at }}
+      expires_at: ${{ steps.security.outputs.expires_at }}
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: '24.22.2'
+      - name: Require existing operator-controlled environment (read only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' repos/zinverno/github-radar/environments/github-pages > "$RUNNER_TEMP/pages-environment.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' repos/zinverno/github-radar/environments/github-pages/deployment-branch-policies > "$RUNNER_TEMP/pages-branches.json"
+          node scripts/pages-environment.mjs "$RUNNER_TEMP/pages-environment.json" "$RUNNER_TEMP/pages-branches.json"
+      - run: npm install --global npm@11.21.1 --ignore-scripts
+      - run: mkdir -p ../build/preview-evidence
+      - id: install
+        run: env -i PATH="$PATH" npm --userconfig=/dev/null ci --ignore-scripts
+      - run: env -i PATH="$PATH" npm --userconfig=/dev/null run lint && env -i PATH="$PATH" npm --userconfig=/dev/null run typecheck && env -i PATH="$PATH" npm --userconfig=/dev/null test
+      - run: env -i PATH="$PATH" npm --userconfig=/dev/null run build:preview
+      - id: artifact
+        run: node scripts/audit-preview.mjs dist-preview > ../build/preview-evidence/artifact.json
+      - name: Mandatory production audit
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          status=0
+          env -i PATH="$PATH" npm --userconfig=/dev/null audit --omit=dev --json > ../build/preview-evidence/npm-production.json || status=$?
+          printf '%s\n' "$status" > ../build/preview-evidence/npm-production.exit
+          exit "$status"
+      - name: Full audit (raw failure retained; strict gate below)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          status=0
+          env -i PATH="$PATH" npm --userconfig=/dev/null audit --json > ../build/preview-evidence/npm-full.json || status=$?
+          printf '%s\n' "$status" > ../build/preview-evidence/npm-full.exit
+          exit "$status"
+      - name: Verify approved policy and exact reviewed artifact hashes
+        id: security
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.artifact.outcome == 'success' }}
+        run: |
+          git -C .. diff --exit-code
+          node scripts/preview-security.mjs
+          printf 'verified_at=%s\n' "$(date -u +%s)" >> "$GITHUB_OUTPUT"
+          node -p '"expires_at=" + require("../docs/security/static-preview-policy.json").expires_at' >> "$GITHUB_OUTPUT"
+      - name: Retain full evidence even when approval/audit blocks publication
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: static-preview-publication-evidence
+          path: build/preview-evidence/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Package only the verified static directory
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: web/dist-preview/
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Approval must arrive before expiry and within one hour of the audit
+        env:
+          VERIFIED_AT: ${{ needs.prepare.outputs.verified_at }}
+          EXPIRES_AT: ${{ needs.prepare.outputs.expires_at }}
+        run: |
+          now=$(date -u +%s)
+          test "$now" -lt "$(date -ud "$EXPIRES_AT" +%s)"
+          test "$now" -ge "$VERIFIED_AT"
+          test "$((now - VERIFIED_AT))" -lt 3600
+      - name: Publish reviewed static preview
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

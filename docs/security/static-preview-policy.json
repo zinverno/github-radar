@@ -1,0 +1,129 @@
+{
+  "scope": "github-radar/v0.1.0-preview/static-only",
+  "advisory": "GHSA-g3hv-75wg-m249",
+  "cve": "CVE-2026-118764",
+  "reviewed_at": "2026-11-03T00:00:00Z",
+  "expires_at": "2026-11-17T00:00:00Z",
+  "approval": null,
+  "lock_sha256": "db1cb039baaa35eb39a4ad746d3205006ef5a4f5b5e436ebd823ee9bd136c342",
+  "vulnerabilities_sha256": "efbef24ef59bde54bb50272430f06ac65610beb3496ceabe08e4738f2731943f",
+  "affected_paths": [
+    {
+      "path": "node_modules/@eslint-community/eslint-utils",
+      "version": "4.10.1",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@eslint/config-array",
+      "version": "0.21.2",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@eslint/eslintrc",
+      "version": "3.3.7",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@typescript-eslint/eslint-plugin",
+      "version": "8.71.1",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@typescript-eslint/parser",
+      "version": "8.71.1",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@typescript-eslint/type-utils",
+      "version": "8.71.1",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@typescript-eslint/typescript-estree",
+      "version": "8.71.1",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@typescript-eslint/utils",
+      "version": "8.71.1",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/eslint",
+      "version": "9.39.5",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/eslint-plugin-react-refresh",
+      "version": "0.4.26",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch",
+      "version": "10.2.6",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/minimatch",
+      "version": "3.1.5",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    },
+    {
+      "path": "node_modules/typescript-eslint",
+      "version": "8.71.1",
+      "rationale": "Development-only lint/type-analysis chain; excluded from the reviewed static artifact. Build availability/supply-chain risk requires operator acceptance."
+    }
+  ],
+  "artifact": {
+    "status": "PASS",
+    "total_bytes": 253406,
+    "files": [
+      {
+        "file": "assets/api-BN9913ub.js",
+        "bytes": 6902,
+        "sha256": "48af7eb8d9ac6a0b9667296785df51209f860edd87ee95085c6fc3e8f7985039"
+      },
+      {
+        "file": "assets/index-BeWjSsMo.js",
+        "bytes": 234724,
+        "sha256": "1140b3a678be5532a0c5d3d85cde14e0ec1d60ad0005f94a061252734a7e537c"
+      },
+      {
+        "file": "assets/index-D5TeQHXP.css",
+        "bytes": 10799,
+        "sha256": "468b3c6bcf72a4c6c2303db32ac3885ab2fd7d5d1f90c579d916049cba5e0917"
+      },
+      {
+        "file": "index.html",
+        "bytes": 981,
+        "sha256": "5424542bb8a913057f4adc7b85b82ea06923946c4a64dc316b31c583497e0d5c"
+      }
+    ]
+  },
+  "toolchain_blockers": [
+    {
+      "package": "npm@11.21.1/node_modules/undici",
+      "version": "6.29.0",
+      "fixed_version": "6.29.1",
+      "severity": "high",
+      "advisory": "GHSA-2m5v-pch6-74hx",
+      "cve": "CVE-2026-109383"
+    },
+    {
+      "package": "npm@11.21.1/node_modules/undici",
+      "version": "6.29.0",
+      "fixed_version": "6.29.1",
+      "severity": "high",
+      "advisory": "GHSA-xjj6-f33q-929c",
+      "cve": "CVE-2026-109869"
+    },
+    {
+      "package": "npm@11.21.1/node_modules/undici",
+      "version": "6.29.0",
+      "fixed_version": "6.29.1",
+      "severity": "high",
+      "advisory": "GHSA-qrxm-fqhp-jwvm",
+      "cve": "CVE-2026-87018"
+    }
+  ]
+}

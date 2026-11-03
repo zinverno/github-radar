@@ -229,7 +229,7 @@ p {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
   gap: 1rem;
 }
 
@@ -254,6 +254,7 @@ p {
 }
 
 .card {
+  min-width: 0;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -277,9 +278,23 @@ p {
 
 .card-action {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
 }
+
+.demo-notice {
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+}
+.demo-notice strong { color: var(--warn); }
+.demo-notice p { margin: 0.4rem 0 0; }
+
+.table-scroll { overflow-x: auto; }
 
 .card-body {
   padding: 1rem;
@@ -525,11 +540,15 @@ input:focus {
 
 .toolbar label {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   align-items: center;
   gap: 0.4rem;
   color: var(--muted);
   font-size: 0.9rem;
 }
+
+.toolbar input:not([type="checkbox"]) { min-width: 0; max-width: 100%; }
 
 .pager {
   display: flex;

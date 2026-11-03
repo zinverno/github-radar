@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { STATIC_PREVIEW } from "../lib/preview";
 
 export function Loading({ label = "Loading…" }: { label?: string }) {
   return (
@@ -11,7 +12,7 @@ export function Loading({ label = "Loading…" }: { label?: string }) {
 }
 
 export function ErrorState({
-  title = "Something went wrong",
+  title = STATIC_PREVIEW ? "Demo record unavailable" : "Something went wrong",
   error,
   onRetry,
 }: {
@@ -24,7 +25,8 @@ export function ErrorState({
       <h2>{title}</h2>
       <p>{error.message}</p>
       <p className="muted">
-        Try reloading the page; if it persists, check the server logs.
+        {STATIC_PREVIEW ? "Browse the included demo repositories and topics from the navigation above."
+          : "Try reloading the page; if it persists, check the server logs."}
       </p>
       {onRetry ? (
         <button type="button" className="button" onClick={onRetry}>

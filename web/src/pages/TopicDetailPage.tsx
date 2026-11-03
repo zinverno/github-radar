@@ -62,6 +62,7 @@ export function TopicDetailPage() {
             <EmptyState>No repositories under this topic.</EmptyState>
           </div>
         ) : (
+          <div className="table-scroll" role="region" aria-label="Topic repositories table" tabIndex={0}>
           <table className="data">
             <thead>
               <tr>
@@ -105,6 +106,7 @@ export function TopicDetailPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
 

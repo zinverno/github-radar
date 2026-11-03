@@ -2,7 +2,9 @@
 
 Current PostgreSQL runtime/configuration: [Phase 8C-B migration](PHASE8C_B_MIGRATION_VERIFICATION.md).
 The dated acceptance counts below describe their original phase; TLS/SCRAM is now
-mandatory on loopback as well as remote connections. PRE-BETA-UX-001 remains open.
+mandatory on loopback as well as remote connections. The shared CSS fix and static
+preview verification for PRE-BETA-UX-001 are recorded in [Static preview](STATIC_PREVIEW.md).
+Backend publication acceptance remains separate; the dated results below are historical.
 
 For the current Render/Neon deployment procedure and stricter role/TLS requirements,
 use [Phase 8C-A public deployment](PUBLIC_DEPLOYMENT.md). This document retains
