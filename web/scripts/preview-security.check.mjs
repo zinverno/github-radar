@@ -55,6 +55,7 @@ for (const [name, mutate] of Object.entries({
   production: x => { x.production = globalThis.structuredClone(x.full); x.productionExit = 1; },
   registryError: x => { x.full = { error: { code: "EAI_AGAIN" } }; },
   missingReport: x => { x.full = {}; },
+  malformedProductionReport: x => { x.production.vulnerabilities = []; },
   incompleteCounts: x => { x.full.metadata.vulnerabilities.total--; },
   unexpectedExit: x => { x.fullExit = 2; },
   productionExit: x => { x.productionExit = 1; },

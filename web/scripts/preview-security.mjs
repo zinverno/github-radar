@@ -19,6 +19,7 @@ export function verifySecurity({ full, production, fullExit, productionExit, pol
   for (const report of [full, production]) {
     assert.equal(report.auditReportVersion, 2, "Missing/unsupported audit report");
     assert(!report.error && report.vulnerabilities && report.metadata?.vulnerabilities, "Audit unavailable");
+    assert(typeof report.vulnerabilities === "object" && !Array.isArray(report.vulnerabilities), "Malformed audit findings");
     const counts = { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 };
     for (const entry of Object.values(report.vulnerabilities)) {
       assert(Object.hasOwn(counts, entry.severity) && entry.severity !== "total", "Unknown severity");

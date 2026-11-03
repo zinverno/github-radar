@@ -222,7 +222,7 @@ No Pages/environment settings were modified or claimed verified remotely.
 ## Verification of this change
 
 - Fresh full/production audits and compatible-fix dry run, with complete raw JSON.
-- 62 frontend tests, lint, TypeScript, artifact guard and 24 security/environment tests
+- 62 frontend tests, lint, TypeScript, artifact guard and 25 security/environment tests
   pass. The actual committed proposal returns **BLOCKED / UNAPPROVED**, exit 1.
   A hypothetical approval is tested only in memory, including rejection when
   toolchain highs remain. No approval is written to the policy.
