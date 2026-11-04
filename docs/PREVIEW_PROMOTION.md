@@ -88,11 +88,37 @@ Proposed operator decision, **not accepted**:
 > or any Docker/backend/Neon/Render/collection release.
 
 `approval` remains **null**. After explicit review, a separately approved change
-may record `approver` (GitHub login), `approved_at` (UTC), `record` (the operator's
-PR review/comment permalink), `artifact_sha256` and all four exact
-`accepted_historical_risks` strings from the manifest. Test approvals exist only
-in memory. Missing/incomplete/future approval or expiry blocks publication. This
-record is reviewed Git configuration, not a cryptographic operator signature.
+may record `approver` (GitHub login), `approved_at` (the comment's exact GitHub
+`created_at` UTC value), `record` (the operator's conversation-comment permalink
+on **PR #7**, ending `#issuecomment-ID`), `artifact_sha256` and all four exact
+`accepted_historical_risks` strings from the manifest. PR review permalinks are
+not accepted. Test approvals exist only in memory.
+
+The operator must post the following exact comment themselves, only if accepting
+the decision. Line-ending differences and surrounding whitespace are allowed;
+additional text, quotes or omitted risks are rejected:
+
+```text
+I approve publication of GitHub Radar v0.1.0-preview artifact 13256888181.
+SHA-256: 7f9ff80c9d3fb4dde2b0b2ccd513de2022527c8a7716dd17ee0c126c6ceca932
+I accept the following historical build-toolchain risks for this exact artifact:
+- GHSA-g3hv-75wg-m249 / CVE-2026-118764
+- GHSA-2m5v-pch6-74hx / CVE-2026-109383
+- GHSA-xjj6-f33q-929c / CVE-2026-109869
+- GHSA-qrxm-fqhp-jwvm / CVE-2026-87018
+This approval does not authorize a rebuild, an npm exception, or a Docker/backend release.
+```
+
+Every approval check independently reads GitHub's
+[issue-comment API](https://docs.github.com/en/rest/issues/comments#get-an-issue-comment)
+over HTTPS. It verifies the comment ID, repository/PR URLs, human author login,
+creation time and complete acceptance text against the reviewed configuration.
+Public comment reads use no credentials or additional workflow permissions.
+Missing/deleted comments, API failures, mismatches, future approval and expiry all
+block publication. **Any edit** (`updated_at` differs from `created_at`) blocks;
+post a fresh comment and separately review its new record instead. The check
+authenticates the current GitHub record, not a cryptographic operator signature;
+protected-environment approval remains independently required.
 
 The source audit artifact is independently pinned by its ZIP digest and all seven
 file hashes. Its complete raw JSON, exit codes and blocked decision are retained
@@ -159,6 +185,9 @@ Minimum remaining operator steps:
 - Standard-library tests reject changed provenance, foreign repositories, reruns,
   failed build steps, expired artifacts, wrong archives/file hashes, extra and
   duplicate entries, traversal, symlinks/special files and incomplete approval.
+  Focused approval tests cover an independently fetched valid comment, wrong
+  PR/author/time, edits, missing/deleted records, API failures, missing risks,
+  wrong artifact/hash, quoted or negated acceptance and appended revocation.
   Content and environment checks reject leaks, maps, endpoints and absent protection.
   Workflow actionlint passes. Actual approval check exits nonzero: **UNAPPROVED**.
 - No preview rebuild or npm invocation. Existing UI/browser tests were not repeated

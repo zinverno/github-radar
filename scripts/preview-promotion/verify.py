@@ -8,6 +8,8 @@ import stat
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 
 def require(condition, message):
@@ -184,6 +186,18 @@ def verify_files(policy, evidence, output):
         (evidence / "original-audits" / name).write_bytes(data)
 
 
+def approval_comment_body(policy):
+    return (
+        "I approve publication of GitHub Radar v0.1.0-preview "
+        f"artifact {policy['candidate']['id']}.\n"
+        f"SHA-256: {policy['candidate']['sha256']}\n"
+        "I accept the following historical build-toolchain risks for this exact artifact:\n"
+        + "\n".join(f"- {risk}" for risk in policy["historical_risks"])
+        + "\nThis approval does not authorize a rebuild, an npm exception, "
+        "or a Docker/backend release."
+    )
+
+
 def verify_approval(policy, now):
     require(
         policy["scope"] == "github-radar/v0.1.0-preview/artifact-13256888181-only",
@@ -195,13 +209,11 @@ def verify_approval(policy, now):
         re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9-]{0,38}", approval.get("approver", "")),
         "Missing operator",
     )
-    require(
-        re.fullmatch(
-            r"https://github\.com/zinverno/github-radar/pull/\d+#(?:issuecomment|pullrequestreview)-\d+",
-            approval.get("record", ""),
-        ),
-        "Missing approval record",
+    record = re.fullmatch(
+        r"https://github\.com/zinverno/github-radar/pull/7#issuecomment-([1-9]\d*)",
+        approval.get("record", ""),
     )
+    require(record, "Approval must be a conversation comment on PR #7")
     require(
         timestamp("2026-11-04T00:00:00Z")
         <= timestamp(approval["approved_at"])
@@ -213,6 +225,50 @@ def verify_approval(policy, now):
         approval.get("artifact_sha256") == policy["candidate"]["sha256"]
         and approval.get("accepted_historical_risks") == policy["historical_risks"],
         "Approval does not cover this artifact and historical risks",
+    )
+    url = f"https://api.github.com/repos/zinverno/github-radar/issues/comments/{record[1]}"
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "github-radar-preview-promotion",
+            "Cache-Control": "no-cache",
+        },
+    )
+    # Public comment reads need no token or additional workflow permissions.
+    try:
+        with urlopen(request, timeout=20) as response:
+            require(response.status == 200 and response.geturl() == url, "Unexpected API response")
+            comment = json.load(response)
+    except (URLError, OSError, ValueError) as error:
+        raise ValueError("Could not independently fetch the GitHub approval comment") from error
+    require(isinstance(comment, dict), "Missing GitHub approval comment")
+    require(
+        comment.get("id") == int(record[1])
+        and comment.get("url") == url
+        and comment.get("html_url") == approval["record"]
+        and comment.get("issue_url")
+        == "https://api.github.com/repos/zinverno/github-radar/issues/7",
+        "GitHub approval comment belongs to another record or PR",
+    )
+    user = comment.get("user")
+    require(
+        isinstance(user, dict)
+        and user.get("type") == "User"
+        and isinstance(user.get("login"), str)
+        and user["login"].casefold() == approval["approver"].casefold(),
+        "GitHub approval author does not match the recorded operator",
+    )
+    require(comment.get("created_at") == approval["approved_at"], "Approval creation time mismatch")
+    require(
+        comment.get("updated_at") == comment["created_at"], "Edited approval; post a new comment"
+    )
+    body = comment.get("body")
+    require(
+        isinstance(body, str)
+        and body.replace("\r\n", "\n").strip() == approval_comment_body(policy),
+        "GitHub comment does not explicitly accept this artifact and all four historical risks",
     )
 
 
