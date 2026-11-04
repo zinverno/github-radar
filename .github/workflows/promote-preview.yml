@@ -1,0 +1,93 @@
+name: Promote exact reviewed preview
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: 'Reviewed promotion workflow commit on main (full SHA)'
+        type: string
+        required: true
+      confirm_publication:
+        description: 'Publish only artifact 13256888181 after recorded historical-risk approval'
+        type: boolean
+        required: true
+        default: false
+permissions: {}
+concurrency:
+  group: static-preview-pages
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: >-
+      github.repository == 'zinverno/github-radar' && github.ref == 'refs/heads/main' &&
+      inputs.reviewed_sha == github.sha && inputs.confirm_publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      expires_at: ${{ steps.approval.outputs.expires_at }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Fetch only the pinned artifact and its original provenance (no rebuild)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/promotion"
+          gh api repos/zinverno/github-radar/actions/runs/41689975111 > "$RUNNER_TEMP/promotion/run.json"
+          gh api repos/zinverno/github-radar/actions/runs/41689975111/jobs > "$RUNNER_TEMP/promotion/jobs.json"
+          gh api repos/zinverno/github-radar/git/commits/f1a905fcb5af18601a29cd6cb7d44e6d222275d3 > "$RUNNER_TEMP/promotion/merge.json"
+          gh api -H 'Accept: application/vnd.github.raw+json' 'repos/zinverno/github-radar/contents/.github/workflows/static-preview.yml?ref=f1a905fcb5af18601a29cd6cb7d44e6d222275d3' > "$RUNNER_TEMP/promotion/source-workflow.yml"
+          gh api -H 'Accept: application/vnd.github.raw+json' 'repos/zinverno/github-radar/contents/docs/security/static-preview-policy.json?ref=d98a446baf9e133804c923d693182bc06b19d574' > "$RUNNER_TEMP/promotion/source-policy.json"
+          gh api repos/zinverno/github-radar/actions/artifacts/13256888181 > "$RUNNER_TEMP/promotion/candidate-metadata.json"
+          gh api repos/zinverno/github-radar/actions/artifacts/13256713232 > "$RUNNER_TEMP/promotion/evidence-metadata.json"
+          gh api repos/zinverno/github-radar/actions/artifacts/13256888181/zip > "$RUNNER_TEMP/promotion/candidate.zip"
+          gh api repos/zinverno/github-radar/actions/artifacts/13256713232/zip > "$RUNNER_TEMP/promotion/evidence.zip"
+      - name: Verify provenance, archive safety and every reviewed file hash
+        run: |
+          python3 scripts/preview-promotion/verify.py verify --evidence "$RUNNER_TEMP/promotion" --output "$RUNNER_TEMP/preview"
+          node scripts/preview-promotion/audit-preview.mjs "$RUNNER_TEMP/preview" > "$RUNNER_TEMP/promotion/content-audit.json"
+      - name: Preserve original full audits and promotion evidence, including blocked decisions
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: preview-promotion-evidence
+          path: ${{ runner.temp }}/promotion/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Require the separate recorded artifact approval
+        id: approval
+        run: |
+          expires_at=$(python3 scripts/preview-promotion/verify.py approve)
+          printf 'expires_at=%s\n' "$expires_at" >> "$GITHUB_OUTPUT"
+      - name: Require an existing protected environment (read only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' repos/zinverno/github-radar/environments/github-pages > "$RUNNER_TEMP/pages-environment.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' repos/zinverno/github-radar/environments/github-pages/deployment-branch-policies > "$RUNNER_TEMP/pages-branches.json"
+          node scripts/preview-promotion/pages-environment.mjs "$RUNNER_TEMP/pages-environment.json" "$RUNNER_TEMP/pages-branches.json"
+      - name: Package only the four verified static files
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/preview/
+  deploy:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Stop if the original artifact expired while waiting for approval
+        env:
+          EXPIRES_AT: ${{ needs.verify.outputs.expires_at }}
+        run: test "$(date -u +%s)" -lt "$(date -ud "$EXPIRES_AT" +%s)"
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

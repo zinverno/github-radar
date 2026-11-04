@@ -1,0 +1,99 @@
+{
+  "scope": "github-radar/v0.1.0-preview/artifact-13256888181-only",
+  "repository": "zinverno/github-radar",
+  "repository_id": 1381365136,
+  "source_head": "d98a446baf9e133804c923d693182bc06b19d574",
+  "source_base": "435cee961bf73b0a71fa9e84394fa3e850cf4e1c",
+  "source_checkout": "f1a905fcb5af18601a29cd6cb7d44e6d222275d3",
+  "run_id": 41689975111,
+  "run_attempt": 1,
+  "workflow_id": 405923559,
+  "workflow_path": ".github/workflows/static-preview.yml",
+  "workflow_sha256": "4e7c21d9a1402ed09884b5001cbfebb6fe7d5f5e0568b02b6cb92500a934c516",
+  "source_policy_sha256": "792ea6d7a178134c82c7eac183110fa4eb7c310edccf2c4284b7f1f5a893ac1a",
+  "source_job_id": 126105678130,
+  "source_steps": {
+    "Run env -i PATH=\"$PATH\" npm --userconfig=/dev/null ci --ignore-scripts": "success",
+    "Run npm run lint && npm run typecheck && npm test": "success",
+    "Run env -i PATH=\"$PATH\" npm --userconfig=/dev/null run build:preview": "success",
+    "Run node scripts/audit-preview.mjs dist-preview > ../build/preview-evidence/artifact.json": "success",
+    "Production dependency audit (mandatory)": "success",
+    "Full dependency audit (retain raw failure; strict gate below)": "success",
+    "Preview security decision (unapproved exceptions fail)": "failure",
+    "Retain candidate for review even when dependency audit fails": "success",
+    "Retain complete audit findings": "success"
+  },
+  "candidate": {
+    "id": 13256888181,
+    "name": "github-radar-v0.1.0-preview-review",
+    "size": 80048,
+    "sha256": "7f9ff80c9d3fb4dde2b0b2ccd513de2022527c8a7716dd17ee0c126c6ceca932",
+    "expires_at": "2026-11-10T18:03:39Z"
+  },
+  "evidence": {
+    "id": 13256713232,
+    "name": "static-preview-audit-evidence",
+    "size": 2927,
+    "sha256": "20b775a6ab7a097435ceeaa3e161f09697f255716d3c71e896fdc8c8a789f349",
+    "expires_at": "2027-02-01T18:02:32Z"
+  },
+  "files": [
+    {
+      "file": "assets/api-BN9913ub.js",
+      "bytes": 6902,
+      "sha256": "48af7eb8d9ac6a0b9667296785df51209f860edd87ee95085c6fc3e8f7985039"
+    },
+    {
+      "file": "assets/index-BeWjSsMo.js",
+      "bytes": 234724,
+      "sha256": "1140b3a678be5532a0c5d3d85cde14e0ec1d60ad0005f94a061252734a7e537c"
+    },
+    {
+      "file": "assets/index-D5TeQHXP.css",
+      "bytes": 10799,
+      "sha256": "468b3c6bcf72a4c6c2303db32ac3885ab2fd7d5d1f90c579d916049cba5e0917"
+    },
+    {
+      "file": "index.html",
+      "bytes": 981,
+      "sha256": "5424542bb8a913057f4adc7b85b82ea06923946c4a64dc316b31c583497e0d5c"
+    }
+  ],
+  "historical_risks": [
+    "GHSA-g3hv-75wg-m249 / CVE-2026-118764",
+    "GHSA-2m5v-pch6-74hx / CVE-2026-109383",
+    "GHSA-xjj6-f33q-929c / CVE-2026-109869",
+    "GHSA-qrxm-fqhp-jwvm / CVE-2026-87018"
+  ],
+  "approval": null,
+  "evidence_files": {
+    "artifact.json": {
+      "bytes": 688,
+      "sha256": "3507430702a94902e5b2851162965d2fe9007512232c7486f55a7219959082fa"
+    },
+    "bundle-modules.json": {
+      "bytes": 2203,
+      "sha256": "fcd4d7cb7f927070641970a0e7d4659238975bd4340be2ca00c8609ba28b5771"
+    },
+    "npm-full.exit": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "npm-full.json": {
+      "bytes": 7463,
+      "sha256": "c90a9068147a69d002f25f355469e53a688c4b56f662e5632c4ae872c0c5aed2"
+    },
+    "npm-production.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "npm-production.json": {
+      "bytes": 364,
+      "sha256": "0aca58462b3d774577820bf36408ebb62bb142713e61fdaf4d3908c63c6e3f5e"
+    },
+    "security-gate.json": {
+      "bytes": 98,
+      "sha256": "861683214911767f0a70cba13d3c660e402eb6576c690769153f3957620619ba"
+    }
+  }
+}
